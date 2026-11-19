@@ -16,7 +16,7 @@ import os
 
 import pymupdf
 
-from page_facts import to_page, to_page_rect
+from page_facts import radio_buttons, to_page, to_page_rect
 
 _FONT_FILE = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
 _FONT_NAME = "dvs"
@@ -99,7 +99,13 @@ def _text(page: pymupdf.Page, mark: dict, x: float, y: float) -> None:
         raise _Problem("'text' must be a non-empty string.")
     if "\n" in text or "\r" in text:
         raise _Problem("the text has a line break; use one text mark per line.")
+    missing = "".join(dict.fromkeys(c for c in text if not _FONT.has_glyph(ord(c))))
+    if missing:
+        raise _Problem(f"the font has no glyph for {', '.join(repr(c) for c in missing)}; "
+                       f"leave those characters out or replace them.")
     size = _positive(mark, "size", _TEXT_SIZE)
+    if size < _MIN_SIZE:
+        raise _Problem(f"size {size:g} pt is below the {_MIN_SIZE} pt floor; text that small is not readable.")
     width = _FONT.text_length(text, fontsize=size)
     if mark.get("max_width") is not None:
         max_width = _positive(mark, "max_width", 0)
@@ -174,6 +180,14 @@ def _option_values(widget) -> dict[str, str]:
     return out
 
 
+def _cp1252(c: str) -> bool:
+    try:
+        c.encode("cp1252")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _field(widgets: list, value) -> set[int]:
     w0 = widgets[0]
     t = w0.field_type
@@ -186,7 +200,7 @@ def _field(widgets: list, value) -> set[int]:
             raise _Problem(f"a checkbox takes true or false, not {value!r}.")
         targets = [(w, value) for w in widgets]
     elif t == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
-        states = {w.on_state(): w for w in widgets}
+        states = radio_buttons(widgets)
         if not isinstance(value, str) or value not in states:
             raise _Problem(f"{value!r} is not one of this radio group's choices: "
                            f"{', '.join(str(s) for s in states)}.")
@@ -199,6 +213,12 @@ def _field(widgets: list, value) -> set[int]:
     elif t == pymupdf.PDF_WIDGET_TYPE_TEXT:
         if not isinstance(value, str):
             raise _Problem(f"a text field takes a string, not {value!r}.")
+        if value == "":
+            raise _Problem("clearing a field is not supported; use undo_last_write.")
+        bad = "".join(dict.fromkeys(c for c in value if not _cp1252(c)))
+        if bad:   # the field's own font (Helvetica, WinAnsi) draws these as nothing or garbage
+            raise _Problem(f"this field's font cannot show {', '.join(repr(c) for c in bad)}; "
+                           f"write it as a text mark over the field instead.")
         targets = [(w, value) for w in widgets]
     else:
         raise _Problem(f"fields of type {w0.field_type_string} are not supported.")

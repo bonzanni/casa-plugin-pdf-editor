@@ -170,9 +170,21 @@ def _drawings(page: pymupdf.Page) -> tuple[list[dict], list[dict]]:
             [_box(r) for r in boxes if _visible(r, pr)])
 
 
+def radio_buttons(widgets) -> dict[str, pymupdf.Widget]:
+    """The radio buttons among ``widgets`` by their on-state name (the value that selects each)."""
+    out = {}
+    for w in widgets:
+        if w.field_type == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
+            state = w.on_state()
+            if isinstance(state, str):
+                out.setdefault(state, w)
+    return out
+
+
 def _fields(page: pymupdf.Page) -> list[dict]:
     out = []
-    for w in page.widgets():
+    widgets = list(page.widgets())
+    for w in widgets:
         kind = _FIELD_TYPES.get(w.field_type_string, w.field_type_string.lower())
         value = w.field_value
         if kind == "checkbox":
@@ -180,8 +192,12 @@ def _fields(page: pymupdf.Page) -> list[dict]:
         rect = to_displayed(page, w.rect)
         if not _visible(rect, page.rect):
             continue
+        if kind == "radiobutton":
+            options = list(radio_buttons(x for x in widgets if x.field_name == w.field_name))
+        else:
+            options = list(w.choice_values or [])
         out.append({"name": w.field_name, "type": kind, "value": value,
-                    "options": list(w.choice_values or []),
+                    "options": options,
                     **_box(rect)})
     return out
 

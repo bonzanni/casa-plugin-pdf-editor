@@ -90,3 +90,11 @@ def test_content_hidden_by_the_cropbox_is_not_reported():
 def test_to_displayed_takes_a_pair_as_a_point():
     page = pymupdf.open(stream=rotated_form(), filetype="pdf")[0]
     assert to_displayed(page, (10, 20)) == to_displayed(page, pymupdf.Point(10, 20))
+
+
+def test_radio_buttons_list_their_group_choices_and_own_rectangles():
+    from fixtures import radio_form
+    buttons = [f for f in facts(radio_form(), 1)["fields"] if f["name"] == "pick"]
+    assert [b["type"] for b in buttons] == ["radiobutton", "radiobutton"]
+    assert [b["options"] for b in buttons] == [["a", "b"], ["a", "b"]]
+    assert [(b["x0"], b["y0"], b["x1"], b["y1"]) for b in buttons] == [(100, 100, 115, 115), (100, 130, 115, 145)]

@@ -1,6 +1,6 @@
 import pymupdf
 
-from fixtures import cropped_form, field_form, flat_form, has_ink, raw_span, rotated_field_form, rotated_form
+from fixtures import cropped_form, field_form, flat_form, has_ink, radio_form, raw_span, rotated_field_form, rotated_form
 from marks import apply
 from page_facts import facts, to_page_rect
 
@@ -128,28 +128,8 @@ def test_field_values_of_the_wrong_kind_are_refused():
     assert "red, blue" in report[2]["problem"]
 
 
-def _radio_form() -> bytes:
-    """Two radio buttons grouped under one parent field 'pick', on-states 'a' and 'b'."""
-    doc = pymupdf.open(); page = doc.new_page()
-    for r in [(100, 100, 115, 115), (100, 130, 115, 145)]:
-        w = pymupdf.Widget(); w.field_type = pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON; w.field_name = "pick"
-        w.rect = pymupdf.Rect(r); w.field_value = False
-        page.add_widget(w)
-    doc = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
-    kids = [w.xref for w in doc[0].widgets()]
-    parent = doc.get_new_xref()
-    doc.update_object(parent, f"<< /FT /Btn /Ff 49152 /T (pick) /V /Off /Kids [{' '.join(f'{k} 0 R' for k in kids)}] >>")
-    for k, state in zip(kids, "ab"):
-        off, on = doc.xref_get_key(k, "AP/N/Off")[1], doc.xref_get_key(k, "AP/N/Yes")[1]
-        for key in ("T", "FT", "Ff", "V"):
-            doc.xref_set_key(k, key, "null")
-        doc.xref_set_key(k, "Parent", f"{parent} 0 R")
-        doc.xref_set_key(k, "AP", f"<< /N << /Off {off} /{state} {on} >> >>")
-    doc.xref_set_key(doc.pdf_catalog(), "AcroForm/Fields", f"[{parent} 0 R]")
-    return doc.tobytes()
-
 def test_radio_group_takes_the_on_state_of_one_button():
-    out, report, _ = apply(_radio_form(), [], {"pick": "b"})
+    out, report, _ = apply(radio_form(), [], {"pick": "b"})
     assert report == [{"ok": True, "what": "field 'pick'", "problem": None}]
     assert [f["value"] for f in facts(out, 1)["fields"]] == ["Off", "b"]
     out, report, _ = apply(out, [], {"pick": "a"})
@@ -163,3 +143,42 @@ def test_signature_field_is_refused():
     w.rect = pymupdf.Rect(100, 100, 300, 140); page.add_widget(w)
     _, report, pages = apply(doc.tobytes(), [], {"sig": "A. Example"})
     assert report[0]["ok"] is False and "digital-signature field" in report[0]["problem"] and pages == []
+
+
+# Fix round 1: refuse what would not be readable.
+
+def _baked_text(pdf: bytes) -> str:
+    doc = pymupdf.open(stream=pdf, filetype="pdf"); doc.bake()
+    return pymupdf.open(stream=doc.tobytes(), filetype="pdf")[0].get_text()
+
+def test_text_field_with_accents_is_readable_after_baking():
+    out, report, _ = apply(field_form(), [], {"name": "José Müller"})
+    assert report[0]["ok"] is True
+    assert "José Müller" in _baked_text(out)
+    page = pymupdf.open(stream=out, filetype="pdf")[0]
+    assert has_ink(page.get_pixmap(clip=pymupdf.Rect(200, 590, 400, 620)), inset=2)
+
+def test_text_field_outside_cp1252_is_refused_and_unchanged():
+    out, report, pages = apply(field_form(), [], {"name": "Łukasz Ćwik"})
+    assert report[0]["ok"] is False and "'Ł'" in report[0]["problem"] and "text mark" in report[0]["problem"]
+    assert pages == []
+    before = next(f for f in facts(field_form(), 1)["fields"] if f["name"] == "name")["value"]
+    assert next(f for f in facts(out, 1)["fields"] if f["name"] == "name")["value"] == before
+
+def test_clearing_a_text_field_is_refused():
+    filled, _, _ = apply(field_form(), [], {"name": "A. Example"})
+    out, report, _ = apply(filled, [], {"name": ""})
+    assert report[0]["ok"] is False and "undo_last_write" in report[0]["problem"]
+    assert next(f for f in facts(out, 1)["fields"] if f["name"] == "name")["value"] == "A. Example"
+
+def test_text_with_characters_the_font_lacks_is_refused():
+    out, report, pages = apply(flat_form(), [
+        {"kind": "text", "page": 1, "x": 72, "y": 100, "text": "山田 太郎 😀"},
+        {"kind": "text", "page": 1, "x": 72, "y": 130, "text": "a\tb\x00c"}], {})
+    assert [r["ok"] for r in report] == [False, False] and pages == []
+    assert "'山'" in report[0]["problem"] and "'\\t'" in report[1]["problem"] and "'\\x00'" in report[1]["problem"]
+    assert facts(out, 1)["text"] == facts(flat_form(), 1)["text"]
+
+def test_text_below_six_points_is_refused():
+    _, report, _ = apply(flat_form(), [{"kind": "text", "page": 1, "x": 72, "y": 100, "text": "tiny", "size": 5}], {})
+    assert report[0]["ok"] is False and "6 pt" in report[0]["problem"]

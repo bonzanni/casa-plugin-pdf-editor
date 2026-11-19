@@ -181,3 +181,24 @@ def raw_span(pdf: bytes, text: str) -> dict:
     finally:
         doc.close()
     raise AssertionError(f"no span {text!r} on page 1")
+
+
+def radio_form() -> bytes:
+    """Two radio buttons grouped under one parent field 'pick', on-states 'a' and 'b'."""
+    doc = pymupdf.open(); page = _new_page(doc)
+    for r in [(100, 100, 115, 115), (100, 130, 115, 145)]:
+        w = pymupdf.Widget(); w.field_type = pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON; w.field_name = "pick"
+        w.rect = pymupdf.Rect(r); w.field_value = False
+        page.add_widget(w)
+    doc = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
+    kids = [w.xref for w in doc[0].widgets()]
+    parent = doc.get_new_xref()
+    doc.update_object(parent, f"<< /FT /Btn /Ff 49152 /T (pick) /V /Off /Kids [{' '.join(f'{k} 0 R' for k in kids)}] >>")
+    for k, state in zip(kids, "ab"):
+        off, on = doc.xref_get_key(k, "AP/N/Off")[1], doc.xref_get_key(k, "AP/N/Yes")[1]
+        for key in ("T", "FT", "Ff", "V"):
+            doc.xref_set_key(k, key, "null")
+        doc.xref_set_key(k, "Parent", f"{parent} 0 R")
+        doc.xref_set_key(k, "AP", f"<< /N << /Off {off} /{state} {on} >> >>")
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm/Fields", f"[{parent} 0 R]")
+    return doc.tobytes()
