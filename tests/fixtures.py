@@ -160,3 +160,24 @@ def rotated_dotted_form() -> bytes:
     doc = _dotted_doc()
     doc[0].set_rotation(90)
     return doc.tobytes()
+
+
+def rotated_field_form() -> bytes:
+    doc = _field_doc()
+    doc[0].set_rotation(90)
+    return doc.tobytes()
+
+
+def raw_span(pdf: bytes, text: str) -> dict:
+    """The first span on page 1 whose text is ``text``, read with PyMuPDF directly
+    (unrotated coordinates), with its ``origin`` and its line's ``dir``."""
+    doc = pymupdf.open(stream=pdf, filetype="pdf")
+    try:
+        for block in doc[0].get_text("dict")["blocks"]:
+            for line in block.get("lines", ()):
+                for span in line["spans"]:
+                    if span["text"] == text:
+                        return {**span, "origin": tuple(span["origin"]), "dir": tuple(line["dir"])}
+    finally:
+        doc.close()
+    raise AssertionError(f"no span {text!r} on page 1")
