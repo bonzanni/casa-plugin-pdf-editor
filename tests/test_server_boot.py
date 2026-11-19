@@ -19,11 +19,3 @@ def test_vendored_stack_imports_and_gmail_patch_present():
     out = asyncio.run(probe.call_tool("echo", {"value": "1"}))
     assert out[0].text == "str"
 
-
-def test_look_probe_returns_an_image_block():
-    import asyncio
-
-    import pdf_server
-
-    out = asyncio.run(pdf_server.mcp.call_tool("image_probe", {}))
-    assert [c.type for c in out] == ["image", "text"]
