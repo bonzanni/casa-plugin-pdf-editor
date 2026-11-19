@@ -154,3 +154,29 @@ def test_stamp_is_unchanged_by_page_fonts_named_like_its_own():
     assert ink_in(control, 1, box) > 100 and ink_in(out, 1, box) == ink_in(control, 1, box)
     shown = [pymupdf.open(stream=p, filetype="pdf")[0].get_text() for p in (out, control)]
     assert shown[0] == shown[1] and "A. Example" in shown[0]
+
+
+@pytest.mark.parametrize("call", ["replace", "fsync"])
+def test_a_failed_signature_write_leaves_the_folder_as_it_was(tmp_path, monkeypatch, call):
+    s = SignatureStore(str(tmp_path)); s.commit(s.set_pending(clean(photo(800, 600))))
+    pid = s.set_pending(clean(photo(900, 500)))
+    folder = tmp_path / "signature"
+    before = {p.name: p.read_bytes() for p in folder.iterdir()}
+
+    def broken(*a, **k):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, call, broken)
+    with pytest.raises(OSError):
+        s.set_pending(clean(photo(700, 500)))
+    with pytest.raises(OSError):
+        s.commit(pid)
+    monkeypatch.undo()
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == before
+
+
+def test_stamp_fonts_are_subset():
+    from fixtures import blank_page
+    out = draw_stamp(blank_page(), page=1, x=72, y=720, width=180, signer_name="Łukasz Ćwik", when="2026-11-19 14:35")
+    assert len(out) < 100_000
+    assert "Łukasz Ćwik" in pymupdf.open(stream=out, filetype="pdf")[0].get_text()

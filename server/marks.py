@@ -116,8 +116,7 @@ def _text(page: pymupdf.Page, mark: dict, x: float, y: float) -> None:
                                f"it needs {_FONT.text_length(text, fontsize=_MIN_SIZE):.1f} points.")
             width = _FONT.text_length(text, fontsize=size)
     _inside(page, x, y - _FONT.ascender * size, x + width, y - _FONT.descender * size)
-    page.insert_text(to_page(page, x, y), text, fontname=font_alias(page, _FONT_NAME, _FONT_FILE),
-                     fontfile=_FONT_FILE,
+    page.insert_text(to_page(page, x, y), text, fontname=font_alias(page, _FONT_NAME), fontfile=_FONT_FILE,
                      fontsize=size, color=_BLACK, rotate=page.rotation)
 
 
@@ -189,26 +188,27 @@ def _cp1252(c: str) -> bool:
     return True
 
 
-def _field_area_text(doc: pymupdf.Document, targets: list, with_value: bool) -> list[str]:
-    """On a throwaway copy of ``doc``: either set the values or remove the target widgets,
-    flatten as signing does, and return the text inside each target widget's rectangle
-    (whitespace collapsed). Without the widgets, that is the page's own text there."""
+def _shown_alone(doc: pymupdf.Document, widget, value) -> str:
+    """The text a field's widget shows once set to ``value`` and flattened (as signing does),
+    with nothing else that could add to it: on a throwaway copy of ``doc`` the page's own
+    content is emptied and every other widget and annotation on that page removed."""
     trial = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
     try:
-        pages = {}   # widgets hold weak references to their page
-        for w, v in targets:
-            pno = w.parent.number
-            page = pages.setdefault(pno, trial[pno])
-            tw = next(x for x in page.widgets() if x.xref == w.xref)
-            if with_value:
-                tw.field_value = v
-                tw.update()
-            else:
-                page.delete_widget(tw)
+        pno = widget.parent.number
+        page = trial[pno]
+        for xref in page.get_contents():
+            trial.update_stream(xref, b"")
+        for annot in list(page.annots()):
+            page.delete_annot(annot)
+        for other in [w for w in page.widgets() if w.xref != widget.xref]:
+            page.delete_widget(other)
+        target = next(w for w in page.widgets() if w.xref == widget.xref)
+        target.field_value = value
+        target.update()
         trial.bake()
-        flat = pymupdf.open(stream=trial.tobytes(), filetype="pdf")
+        flat = pymupdf.open(stream=trial.tobytes(), filetype="pdf")   # reopened: a loaded page keeps its old content
         try:
-            return [" ".join(flat[w.parent.number].get_text(clip=w.rect).split()) for w, _ in targets]
+            return " ".join(flat[pno].get_text(clip=widget.rect).split())
         finally:
             flat.close()
     finally:
@@ -253,17 +253,16 @@ def _field(doc: pymupdf.Document, widgets: list, name: str, value) -> set[int]:
         targets = [(w, value) for w in widgets]
     else:
         raise _Problem(f"fields of type {w0.field_type_string} are not supported.")
-    if t in (pymupdf.PDF_WIDGET_TYPE_TEXT, pymupdf.PDF_WIDGET_TYPE_COMBOBOX, pymupdf.PDF_WIDGET_TYPE_LISTBOX):
-        # ok means: once flattened (signing flattens), the field's own new text is in its area.
-        # The appearance drops what does not fit; page text already there never counts. This is
-        # not a proof of legibility (a field too low can clip letters): the report gives each
-        # field's page and rect so the assistant can look.
-        before = _field_area_text(doc, targets, with_value=False)
-        after = _field_area_text(doc, targets, with_value=True)
-        for (_, v), was, shown in zip(targets, before, after):
-            if _squash(shown).count(_squash(v)) <= _squash(was).count(_squash(v)):
-                raise _Problem(f"the value does not fit field {name!r} (the flattened field shows "
-                               f"{shown!r}); shorten it or write it as a text mark.")
+    if t in (pymupdf.PDF_WIDGET_TYPE_TEXT, pymupdf.PDF_WIDGET_TYPE_COMBOBOX):
+        # ok means: once flattened (signing flattens), the field's own text is its whole value.
+        # The appearance drops what does not fit. This is not a proof of legibility (a field too
+        # low can clip letters): the report gives the field's page and rect so the assistant can
+        # look. A listbox shows its options rather than its value, so it is not checked.
+        w, v = targets[0]
+        shown = _shown_alone(doc, w, v)
+        if _squash(shown) != _squash(v):
+            raise _Problem(f"the value does not fit field {name!r} (only {shown!r} would show); "
+                           f"shorten it or write it as a text mark.")
     for w, v in targets:
         w.field_value = v
         w.update()
@@ -327,6 +326,22 @@ def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[byt
                 run(f"field {_short(str(name))!r}", fill)
                 report[-1].update(_where(by_name.get(name)))
 
-        return doc.tobytes(garbage=3, deflate=True), report, sorted(touched)
+        return _save(doc), report, sorted(touched)
     finally:
         doc.close()
+
+
+def _save(doc: pymupdf.Document) -> bytes:
+    """The document's bytes with its embedded fonts cut down to the glyphs it uses: every text
+    mark embeds the whole bundled font afresh (about 380 KB). Subsetting runs on a copy, so a
+    PDF MuPDF cannot subset is saved whole rather than half-changed."""
+    whole = doc.tobytes(garbage=3, deflate=True)
+    try:
+        copy = pymupdf.open(stream=whole, filetype="pdf")
+        try:
+            copy.subset_fonts()
+            return copy.tobytes(garbage=3, deflate=True)
+        finally:
+            copy.close()
+    except Exception:
+        return whole

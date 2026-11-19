@@ -11,8 +11,6 @@ it means.
 """
 from __future__ import annotations
 
-import functools
-import hashlib
 import math
 import os
 
@@ -56,29 +54,15 @@ def to_displayed(page: pymupdf.Page, obj):
     return (pymupdf.Rect(obj) * page.rotation_matrix).normalize()
 
 
-@functools.lru_cache(maxsize=None)
-def _font_digest(fontfile: str) -> str:
-    with open(fontfile, "rb") as fh:
-        return hashlib.sha256(fh.read()).hexdigest()
+def font_alias(page: pymupdf.Page, wanted: str) -> str:
+    """An unused resource name for a font the plugin is about to embed on ``page``: ``wanted``
+    if the page has no font of that name, otherwise ``wanted`` plus the first free number.
 
-
-def font_alias(page: pymupdf.Page, wanted: str, fontfile: str) -> str:
-    """The resource name to register ``fontfile`` under on ``page``.
-
-    ``insert_text``/``insert_font`` reuse whatever font a page already maps to a name,
-    so a name the page uses for another font would draw our text in that font. Returns
-    ``wanted`` when the page has no font of that name, or only fonts whose embedded program
-    is ``fontfile`` itself, byte for byte (an earlier write by the plugin embeds the whole
-    file; measured on 1.28.2); otherwise ``wanted`` plus the first number not in use."""
-    doc = page.parent
-    fonts = page.get_fonts(full=True)   # (xref, ext, type, basefont, name, encoding, referencer)
-    used = {f[4] for f in fonts}
-
-    def ours(xref: int) -> bool:
-        buffer = doc.extract_font(xref)[3]
-        return bool(buffer) and hashlib.sha256(buffer).hexdigest() == _font_digest(fontfile)
-
-    if all(ours(f[0]) for f in fonts if f[4] == wanted):
+    ``insert_text``/``insert_font`` draw with whatever font a page already maps to a name, and
+    nothing short of the PDF's own encoding tables says such a font maps characters the way
+    ours does, so a font already in the document is never reused, whatever it contains."""
+    used = {f[4] for f in page.get_fonts(full=True)}   # (xref, ext, type, basefont, name, ...)
+    if wanted not in used:
         return wanted
     n = 1
     while f"{wanted}{n}" in used:

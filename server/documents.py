@@ -50,12 +50,21 @@ class Doc:
 
 
 def _write_atomic(path: str, data: bytes) -> None:
+    """Write ``path`` through a temp file and ``os.replace``; on any failure the temp file
+    goes too, so a failed write leaves no copy outside the recorded history."""
     tmp = path + ".tmp"
-    with open(tmp, "wb") as fh:
-        fh.write(data)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _close(a: float, b: float) -> bool:

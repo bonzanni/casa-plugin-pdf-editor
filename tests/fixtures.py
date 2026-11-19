@@ -318,3 +318,19 @@ def spoofed_dejavu() -> bytes:
         if kind == "array":
             doc.xref_set_key(int(kids.strip("[]").split()[0]), "BaseFont", "/DejaVu#20Sans#20Book")
     return doc.tobytes()
+
+
+def remapped_dejavu() -> bytes:
+    """A blank page with the bundled DejaVu Sans embedded as /dvs, byte for byte, but with a
+    CIDToGIDMap that draws CID i with glyph i + 1, as another producer may legitimately encode it."""
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    page.insert_font(fontname="dvs", fontfile=os.path.join(os.path.dirname(__file__), "..", "server",
+                                                           "fonts", "DejaVuSans.ttf"))
+    xref = page.get_fonts(full=True)[0][0]
+    descendant = int(doc.xref_get_key(xref, "DescendantFonts")[1].strip("[]").split()[0])
+    table = doc.get_new_xref()
+    doc.update_object(table, "<<>>")
+    doc.update_stream(table, b"".join((i + 1).to_bytes(2, "big") for i in range(0xFFFF)))
+    doc.xref_set_key(descendant, "CIDToGIDMap", f"{table} 0 R")
+    return doc.tobytes()

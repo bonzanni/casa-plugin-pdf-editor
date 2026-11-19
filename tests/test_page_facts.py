@@ -100,14 +100,14 @@ def test_radio_buttons_list_their_group_choices_and_own_rectangles():
     assert [(b["x0"], b["y0"], b["x1"], b["y1"]) for b in buttons] == [(100, 100, 115, 115), (100, 130, 115, 145)]
 
 
-def test_font_alias_avoids_a_name_the_page_uses_for_another_font():
+def test_font_alias_never_reuses_a_font_in_the_document():
     import os
     from fixtures import blank_page, fonts_premapped
     from page_facts import font_alias
     dejavu = os.path.join(os.path.dirname(__file__), "..", "server", "fonts", "DejaVuSans.ttf")
     taken = pymupdf.open(stream=fonts_premapped(("dvs", "dvs1")), filetype="pdf")[0]
-    assert font_alias(taken, "dvs", dejavu) == "dvs2"
+    assert font_alias(taken, "dvs") == "dvs2"
     free = pymupdf.open(stream=blank_page(), filetype="pdf")[0]
-    assert font_alias(free, "dvs", dejavu) == "dvs"
+    assert font_alias(free, "dvs") == "dvs"
     free.insert_text((72, 72), "x", fontname="dvs", fontfile=dejavu)
-    assert font_alias(free, "dvs", dejavu) == "dvs"   # the plugin's own font from an earlier write
+    assert font_alias(free, "dvs") == "dvs1"   # even the plugin's own font from an earlier write

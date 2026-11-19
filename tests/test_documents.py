@@ -88,3 +88,22 @@ def test_a_failed_metadata_save_leaves_no_version_file(store, tmp_path, monkeypa
     assert sorted(os.listdir(folder)) == before
     monkeypatch.setattr(type(store), "_save_meta", staticmethod(real))
     assert store.add_version(doc.id, b"%PDF-next") == 1 and store.latest_bytes(doc.id) == b"%PDF-next"
+
+
+@pytest.mark.parametrize("call", ["replace", "fsync"])
+def test_a_failed_version_write_leaves_the_folder_as_it_was(store, tmp_path, monkeypatch, call):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    store.add_version(doc.id, b"%PDF-1")
+    folder = os.path.join(str(tmp_path / "data"), "documents", doc.id)
+    before = {n: open(os.path.join(folder, n), "rb").read() for n in os.listdir(folder)}
+
+    def broken(*a, **k):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, call, broken)
+    with pytest.raises(OSError):
+        store.add_version(doc.id, b"%PDF-signed", signed=True)
+    with pytest.raises(OSError):
+        store.undo(doc.id)
+    monkeypatch.undo()
+    assert {n: open(os.path.join(folder, n), "rb").read() for n in os.listdir(folder)} == before

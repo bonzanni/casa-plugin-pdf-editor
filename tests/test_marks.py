@@ -259,17 +259,33 @@ def test_a_page_font_named_like_ours_does_not_replace_it():
     box = (72, 75, 72 + _DEJAVU.text_length("éΩЖ", 20), 106)
     assert ink_in(control, 1, box) > 100 and ink_in(out, 1, box) == ink_in(control, 1, box)
 
-def test_two_successive_writes_share_our_font_and_both_show():
-    first, _, _ = apply(blank_page(), [{"kind": "text", "page": 1, "x": 72, "y": 100, "text": "éΩЖ", "size": 20}], {})
-    second, report, _ = apply(first, [{"kind": "text", "page": 1, "x": 72, "y": 200, "text": "Łukasz Ćwik", "size": 20}], {})
-    alone, _, _ = apply(blank_page(), [{"kind": "text", "page": 1, "x": 72, "y": 200, "text": "Łukasz Ćwik", "size": 20}], {})
-    assert report[0]["ok"] is True
-    assert {"éΩЖ", "Łukasz Ćwik"} <= {t["text"] for t in facts(second, 1)["text"]}
-    box = (72, 175, 72 + _DEJAVU.text_length("Łukasz Ćwik", 20), 206)
-    assert ink_in(second, 1, box) == ink_in(alone, 1, box) > 100
-    page = pymupdf.open(stream=second, filetype="pdf")[0]
-    assert [f[4] for f in page.get_fonts(full=True)] == ["dvs"]
-    assert len(second) - len(first) < 4000            # the font is reused, not embedded again
+def test_three_successive_writes_each_get_a_fresh_font_and_all_show():
+    pdf = flat_form()
+    lines = [("éΩЖ", 100), ("Łukasz Ćwik", 200), ("José Müller", 300)]
+    sizes = [len(pdf)]
+    for text, y in lines:
+        pdf, report, _ = apply(pdf, [{"kind": "text", "page": 1, "x": 72, "y": y, "text": text, "size": 20}], {})
+        assert report[0]["ok"] is True
+        sizes.append(len(pdf))
+    assert {t for t, _ in lines} <= {t["text"] for t in facts(pdf, 1)["text"]}
+    for text, y in lines:
+        alone, _, _ = apply(flat_form(), [{"kind": "text", "page": 1, "x": 72, "y": y, "text": text, "size": 20}], {})
+        box = (72, y - 25, 72 + _DEJAVU.text_length(text, 20), y + 6)
+        assert ink_in(pdf, 1, box) == ink_in(alone, 1, box) > 100, text
+    page = pymupdf.open(stream=pdf, filetype="pdf")[0]
+    assert sorted(f[4] for f in page.get_fonts(full=True) if f[4].startswith("dvs")) == ["dvs", "dvs1", "dvs2"]
+    assert all(b - a < 60_000 for a, b in zip(sizes, sizes[1:])), sizes   # fonts subset, not 380 KB each
+
+def test_our_font_file_under_another_mapping_is_not_reused():
+    from fixtures import remapped_dejavu
+    mark = [{"kind": "text", "page": 1, "x": 72, "y": 100, "text": "ABCDE", "size": 20}]
+    out, report, _ = apply(remapped_dejavu(), mark, {})
+    control, _, _ = apply(blank_page(), mark, {})
+    assert report[0]["ok"] is True and any(t["text"] == "ABCDE" for t in facts(out, 1)["text"])
+    box = (72, 75, 72 + _DEJAVU.text_length("ABCDE", 20), 106)
+    assert ink_in(control, 1, box) > 100
+    shot = [pymupdf.open(stream=p, filetype="pdf")[0].get_pixmap(clip=box).samples for p in (out, control)]
+    assert shot[0] == shot[1]
 
 def test_a_font_only_named_like_ours_is_not_reused():
     from fixtures import spoofed_dejavu
@@ -304,3 +320,41 @@ def test_field_entries_say_where_to_look():
         for entry, name in zip(report[:3], ("name", "agree", "colour")):
             assert entry["page"] == 1 and entry["rect"] == boxes[name]
         assert report[3]["page"] is None and report[3]["rect"] is None
+
+def _two_sources(printed: str, at, field_rect, size: float = 12) -> bytes:
+    """Text `printed` at 8 pt at `at`, and a text field `f` at `field_rect` with font size `size`."""
+    doc = pymupdf.open(); page = doc.new_page()
+    page.insert_text(at, printed, fontsize=8)
+    w = pymupdf.Widget(); w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT; w.field_name = "f"
+    w.rect = pymupdf.Rect(field_rect); w.text_fontsize = size
+    page.add_widget(w)
+    return doc.tobytes()
+
+def test_printed_text_cannot_complete_a_cut_off_value():
+    src = _two_sources("AB", (101, 110), (100, 100, 118, 120))
+    out, report, pages = apply(src, [], {"f": "ABAB"})
+    assert report[0]["ok"] is False and pages == []
+    assert "only 'AB' would show" in report[0]["problem"]
+    assert facts(out, 1)["fields"][0]["value"] == facts(src, 1)["fields"][0]["value"]
+
+def test_another_field_holding_the_value_does_not_count():
+    doc = pymupdf.open(); page = doc.new_page()
+    for name, rect in (("g", (50, 50, 300, 70)), ("f", (50, 50, 85, 70))):
+        w = pymupdf.Widget(); w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT; w.field_name = name
+        w.rect = pymupdf.Rect(rect); w.text_fontsize = 14
+        page.add_widget(w)
+    value = "ABCDEFGHIJKLMN"
+    filled, report, _ = apply(doc.tobytes(), [], {"g": value})
+    assert report[0]["ok"] is True
+    out, report, _ = apply(filled, [], {"f": value})
+    assert report[0]["ok"] is False and "does not fit field 'f'" in report[0]["problem"]
+    assert {f["name"]: f["value"] for f in facts(out, 1)["fields"]}["g"] == value
+
+def test_a_field_on_a_rotated_page_passes_the_check_and_a_cut_off_one_does_not():
+    out, report, _ = apply(rotated_field_form(), [], {"name": "A. Example"})
+    assert report[0]["ok"] is True
+    doc = pymupdf.open(stream=_narrow_field(), filetype="pdf"); doc[0].set_rotation(90)
+    turned = doc.tobytes()
+    assert apply(turned, [], {"f": "ABC"})[1][0]["ok"] is True
+    _, report, _ = apply(turned, [], {"f": "ABCDEFGHIJKLMN"})
+    assert report[0]["ok"] is False and "only 'ABCDE' would show" in report[0]["problem"]

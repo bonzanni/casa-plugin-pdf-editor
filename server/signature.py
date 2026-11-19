@@ -21,7 +21,7 @@ import tempfile
 
 import pymupdf
 
-from page_facts import _open_page, font_alias, to_page_rect
+from page_facts import _open_page, to_page_rect
 
 _FONTS = os.path.join(os.path.dirname(__file__), "fonts")
 _CAVEAT_FILE = os.path.join(_FONTS, "Caveat-Regular.ttf")
@@ -233,6 +233,8 @@ class SignatureStore:
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)
         except BaseException:
             try:
@@ -341,12 +343,9 @@ def _stamp(width: float, height: float, signer_name: str, when: str) -> pymupdf.
     sheet = pymupdf.open()
     page = sheet.new_page(width=width, height=height)
     # The stamp is its own sheet, placed with show_pdf_page as a form XObject with its own
-    # resources, so the target page's font names cannot override these; font_alias keeps
-    # that true should the sheet ever start out with fonts of its own.
-    dvs = font_alias(page, "dvs", _DEJAVU_FILE)
-    page.insert_font(fontname=dvs, fontfile=_DEJAVU_FILE)
-    sig = font_alias(page, "sig", name_file)
-    page.insert_font(fontname=sig, fontfile=name_file)
+    # resources, so the target page's font names cannot override these.
+    page.insert_font(fontname="dvs", fontfile=_DEJAVU_FILE)
+    page.insert_font(fontname="sig", fontfile=name_file)
 
     cap = height * 0.11
     top = cap * 0.6 + 0.5                       # the frame's top line runs through the caption
@@ -355,18 +354,19 @@ def _stamp(width: float, height: float, signer_name: str, when: str) -> pymupdf.
     cap_x, cap_len = 0.06 * width, _DEJAVU.text_length(_CAPTION, cap)
     page.draw_rect(pymupdf.Rect(cap_x - 2, top - cap * 0.6, cap_x + cap_len + 2, top + cap * 0.6),
                    color=None, fill=(1, 1, 1))
-    page.insert_text((cap_x, top + cap * 0.36), _CAPTION, fontname=dvs, fontsize=cap, color=_BLUE)
+    page.insert_text((cap_x, top + cap * 0.36), _CAPTION, fontname="dvs", fontsize=cap, color=_BLUE)
 
     size = min(width * 2 / 3 / name_font.text_length(signer_name, 1), height * 0.42)
     centre = (top + height) / 2
     baseline = centre + (name_font.ascender + name_font.descender) / 2 * size
     page.insert_text(((width - name_font.text_length(signer_name, size)) / 2, baseline),
-                     signer_name, fontname=sig, fontsize=size, color=_INK)
+                     signer_name, fontname="sig", fontsize=size, color=_INK)
 
     small, inset = height * 0.09, width * 0.03
     for text, base in ((signer_name, height - inset - small * 1.25), (when, height - inset)):
         page.insert_text((width - inset - _DEJAVU.text_length(text, small), base), text,
-                         fontname=dvs, fontsize=small, color=_BLUE)
+                         fontname="dvs", fontsize=small, color=_BLUE)
+    sheet.subset_fonts()   # only the sheet's own two fonts; the stamp is then about 50 KB, not 570
     return sheet
 
 
