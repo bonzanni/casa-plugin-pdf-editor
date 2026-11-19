@@ -33,6 +33,7 @@ The operator sends a photo of their signature on white paper. Get it into the ha
 - Text is placed by its baseline: to write on a line, use a y a couple of points above the line's y.
 - A mark over a form field can be covered by the field; the returned image shows it. Prefer setting the field's value.
 - A text field cannot show characters outside Western European encoding (the refusal says so); use a text mark there instead.
+- After setting form fields, look at each one (zoom with `look_at_page`'s `region`, using the `rect` in the report): a small field can clip a value the report accepted.
 - The plugin only adds to the page. It cannot remove printed dots or text.
 - A signed version is final and flattened. Writing again starts from the last unsigned version and needs a new signature.
 - A refusal is a sentence to relay or act on, not something to retry unchanged.

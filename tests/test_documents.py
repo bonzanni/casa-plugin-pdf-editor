@@ -71,3 +71,20 @@ def test_erase_documents_removes_everything_and_reports_what_is_left(store, tmp_
     assert removed == 1 and left == [keep.id] and sorted(os.listdir(docs)) == [keep.id]
     monkeypatch.setattr(shutil, "rmtree", real)
     assert store.erase_documents() == (1, []) and os.listdir(docs) == []
+
+
+def test_a_failed_metadata_save_leaves_no_version_file(store, tmp_path, monkeypatch):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    folder = os.path.join(str(tmp_path / "data"), "documents", doc.id)
+    before = sorted(os.listdir(folder))
+    real = type(store)._save_meta
+
+    def broken(path, meta):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(type(store), "_save_meta", staticmethod(broken))
+    with pytest.raises(OSError):
+        store.add_version(doc.id, b"%PDF-signed", signed=True)
+    assert sorted(os.listdir(folder)) == before
+    monkeypatch.setattr(type(store), "_save_meta", staticmethod(real))
+    assert store.add_version(doc.id, b"%PDF-next") == 1 and store.latest_bytes(doc.id) == b"%PDF-next"

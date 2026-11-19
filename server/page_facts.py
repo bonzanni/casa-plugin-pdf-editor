@@ -12,6 +12,7 @@ it means.
 from __future__ import annotations
 
 import functools
+import hashlib
 import math
 import os
 
@@ -56,8 +57,9 @@ def to_displayed(page: pymupdf.Page, obj):
 
 
 @functools.lru_cache(maxsize=None)
-def _base_font(fontfile: str) -> str:
-    return pymupdf.Font(fontfile=fontfile).name
+def _font_digest(fontfile: str) -> str:
+    with open(fontfile, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
 
 
 def font_alias(page: pymupdf.Page, wanted: str, fontfile: str) -> str:
@@ -65,13 +67,18 @@ def font_alias(page: pymupdf.Page, wanted: str, fontfile: str) -> str:
 
     ``insert_text``/``insert_font`` reuse whatever font a page already maps to a name,
     so a name the page uses for another font would draw our text in that font. Returns
-    ``wanted`` when the page has no font of that name or only the plugin's own (same base
-    font, embedded TrueType, from an earlier write); otherwise ``wanted`` plus the first
-    number not in use."""
+    ``wanted`` when the page has no font of that name, or only fonts whose embedded program
+    is ``fontfile`` itself, byte for byte (an earlier write by the plugin embeds the whole
+    file; measured on 1.28.2); otherwise ``wanted`` plus the first number not in use."""
+    doc = page.parent
     fonts = page.get_fonts(full=True)   # (xref, ext, type, basefont, name, encoding, referencer)
     used = {f[4] for f in fonts}
-    same = [f for f in fonts if f[4] == wanted]
-    if all(f[3] == _base_font(fontfile) and f[1] == "ttf" and f[2] == "Type0" for f in same):
+
+    def ours(xref: int) -> bool:
+        buffer = doc.extract_font(xref)[3]
+        return bool(buffer) and hashlib.sha256(buffer).hexdigest() == _font_digest(fontfile)
+
+    if all(ours(f[0]) for f in fonts if f[4] == wanted):
         return wanted
     n = 1
     while f"{wanted}{n}" in used:

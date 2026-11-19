@@ -17,6 +17,7 @@ ALLOWED_PREFIXES = ("server/vendor/", "server/fonts/")
 EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".heic", ".gif", ".tif", ".tiff",
               ".bmp", ".webp"}
 SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF8", b"II*\0", b"MM\0*")
+HEIF_BRANDS = (b"heic", b"heix", b"hevc", b"mif1", b"msf1", b"heif")
 PDF_WINDOW = 1024   # readers accept the PDF header anywhere in the first 1024 bytes
 
 
@@ -25,6 +26,8 @@ def _is_document(head: bytes, tail: bytes) -> bool:
     with %%EOF (so source files that merely mention the header do not)."""
     return (head.startswith(SIGNATURES) or head.startswith(b"%PDF")
             or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+            or (head[4:8] == b"ftyp" and head[8:12] in HEIF_BRANDS)
+            or (head[:2] == b"BM" and head[6:10] == b"\0\0\0\0")
             or (b"%PDF-" in head and b"%%EOF" in tail))
 
 

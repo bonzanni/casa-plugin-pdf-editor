@@ -276,14 +276,14 @@ def with_orientation(jpg: bytes, orientation: int) -> bytes:
     return jpg[:2] + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + jpg[2:]
 
 
-def ink_in(pdf: bytes, page: int, rect) -> int:
-    """Dark pixels (grey below 128) in the displayed rectangle ``rect`` of ``page`` (1-based),
-    rendered at 2 pixels per point."""
+def ink_in(pdf: bytes, page: int, rect, below: int = 128) -> int:
+    """Dark pixels (grey under ``below``) in the displayed rectangle ``rect`` of ``page``
+    (1-based), rendered at 2 pixels per point."""
     doc = pymupdf.open(stream=pdf, filetype="pdf")
     try:
         pix = doc[page - 1].get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=pymupdf.Rect(rect), alpha=False,
                                        colorspace=pymupdf.csGRAY)
-        return sum(1 for v in pix.samples if v < 128)
+        return sum(1 for v in pix.samples if v < below)
     finally:
         doc.close()
 
@@ -303,4 +303,18 @@ def fonts_premapped(names: tuple[str, ...] = ("dvs",)) -> bytes:
 def blank_page() -> bytes:
     doc = pymupdf.open()
     _new_page(doc)
+    return doc.tobytes()
+
+
+def spoofed_dejavu() -> bytes:
+    """A blank page with Caveat embedded as /dvs, its font names rewritten to DejaVu Sans's."""
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    page.insert_font(fontname="dvs", fontfile=os.path.join(os.path.dirname(__file__), "..", "server",
+                                                           "fonts", "Caveat-Regular.ttf"))
+    for xref, *_ in page.get_fonts(full=True):
+        doc.xref_set_key(xref, "BaseFont", "/DejaVu#20Sans#20Book")
+        kind, kids = doc.xref_get_key(xref, "DescendantFonts")
+        if kind == "array":
+            doc.xref_set_key(int(kids.strip("[]").split()[0]), "BaseFont", "/DejaVu#20Sans#20Book")
     return doc.tobytes()

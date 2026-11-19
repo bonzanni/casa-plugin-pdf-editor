@@ -166,10 +166,18 @@ class Store:
     def add_version(self, doc_id: str, pdf_bytes: bytes, *, signed: bool = False) -> int:
         path, meta = self._meta(doc_id)
         n = meta["highest"] + 1
-        _write_atomic(os.path.join(path, f"v{n}.pdf"), pdf_bytes)
+        version = os.path.join(path, f"v{n}.pdf")
+        _write_atomic(version, pdf_bytes)
         meta["highest"] = n
         meta["versions"].append({"n": n, "signed": bool(signed)})
-        self._save_meta(path, meta)
+        try:
+            self._save_meta(path, meta)
+        except BaseException:   # no version file outside the history (it may be a signed copy)
+            try:
+                os.remove(version)
+            except OSError:
+                pass
+            raise
         return n
 
     def undo(self, doc_id: str) -> int:

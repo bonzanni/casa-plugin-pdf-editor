@@ -113,12 +113,13 @@ def write_on_pdf(doc_id: str, marks: list[dict] | None = None, fields: dict | No
     """Write on the document, making a new version. marks, each with page and points
     from the top-left as displayed: text {x, y (baseline start), text, size?, max_width?}; tick
     and cross {x, y (centre), size?}; strike {x0, y0, x1, y1}; placeholder {x, y (top-left),
-    width, height}, a grey box allowed only with preview_only. fields: {name: value} (string,
-    true/false for checkboxes, an option for radio and choice). Returns a report per item and
-    images of the pages touched. Look at the returned image and correct anything misplaced
-    before showing the operator; a mark over a form field may be hidden by the field (the
-    image shows the truth). preview_only draws without storing. Writing on a signed document
-    starts from its last unsigned version."""
+    width, height}, preview_only only. fields: {name: value} (string, true/false for
+    checkboxes, an option for radio and choice). Returns a report per item and images of the
+    pages touched. Check the image and fix anything misplaced before showing the operator; a
+    mark over a field may be hidden by it. Look at each field you set (zoom with look_at_page's
+    region, using the report's rect): a small field can clip a value the report accepted.
+    preview_only draws without storing. Writing on a signed document starts from its last
+    unsigned version."""
     docs = _docs()
     doc = docs.get(doc_id)
     if not preview_only and any(isinstance(m, dict) and m.get("kind") == "placeholder"

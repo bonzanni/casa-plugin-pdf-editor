@@ -132,6 +132,10 @@ def test_strike_and_box_on_a_rotated_page_land_where_displayed():
     from page_facts import to_displayed
     rects = [to_displayed(page, d["rect"]) for d in page.get_drawings() if d.get("color") == (0.5, 0.5, 0.5)]
     assert any(abs(r.x0 - 100) < 1 and abs(r.y0 - 400) < 1 and abs(r.x1 - 250) < 1 and abs(r.y1 - 440) < 1 for r in rects)
+    for edge in ((100, 399, 250, 401), (100, 439, 250, 441), (99, 400, 101, 440), (249, 400, 251, 440)):
+        assert ink_in(out, 1, edge, below=200) >= 20, edge                  # the grey border shows
+    for clear in ((104, 404, 246, 436), (100, 445, 250, 470)):
+        assert ink_in(out, 1, clear, below=250) == ink_in(rotated_form(), 1, clear, below=250), clear  # nothing added inside or below
 
 def test_tick_and_cross_draw_ink_inside_their_square():
     # displayed y 400 on rotated_form is blank across x 80..220 (its content sits at displayed y < 270)
@@ -155,7 +159,7 @@ def test_field_values_of_the_wrong_kind_are_refused():
 
 def test_radio_group_takes_the_on_state_of_one_button():
     out, report, _ = apply(radio_form(), [], {"pick": "b"})
-    assert report == [{"ok": True, "what": "field 'pick'", "problem": None}]
+    assert report == [{"ok": True, "what": "field 'pick'", "problem": None, "page": 1, "rect": [100.0, 100.0, 115.0, 115.0]}]
     assert [f["value"] for f in facts(out, 1)["fields"]] == ["Off", "b"]
     out, report, _ = apply(out, [], {"pick": "a"})
     assert [f["value"] for f in facts(out, 1)["fields"]] == ["a", "Off"]
@@ -265,3 +269,38 @@ def test_two_successive_writes_share_our_font_and_both_show():
     assert ink_in(second, 1, box) == ink_in(alone, 1, box) > 100
     page = pymupdf.open(stream=second, filetype="pdf")[0]
     assert [f[4] for f in page.get_fonts(full=True)] == ["dvs"]
+    assert len(second) - len(first) < 4000            # the font is reused, not embedded again
+
+def test_a_font_only_named_like_ours_is_not_reused():
+    from fixtures import spoofed_dejavu
+    mark = [{"kind": "text", "page": 1, "x": 72, "y": 100, "text": "ΩЖ", "size": 20}]
+    out, report, _ = apply(spoofed_dejavu(), mark, {})
+    control, _, _ = apply(blank_page(), mark, {})
+    assert report[0]["ok"] is True and any(t["text"] == "ΩЖ" for t in facts(out, 1)["text"])
+    box = (72, 75, 72 + _DEJAVU.text_length("ΩЖ", 20), 106)
+    assert ink_in(control, 1, box) > 100 and ink_in(out, 1, box) == ink_in(control, 1, box)
+
+def _field_over_text(width: float, printed: str) -> bytes:
+    """A text field `f` at (50, 50, 50 + width, 70), font size 14, over 2-pt printed text."""
+    doc = pymupdf.open(); page = doc.new_page()
+    page.insert_text((51, 60), printed, fontsize=2)
+    w = pymupdf.Widget(); w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT; w.field_name = "f"
+    w.rect = pymupdf.Rect(50, 50, 50 + width, 70); w.text_fontsize = 14
+    page.add_widget(w)
+    return doc.tobytes()
+
+def test_page_text_under_a_field_does_not_count_as_the_value():
+    _, report, _ = apply(_field_over_text(35, "ABCDEFGHIJKLMN"), [], {"f": "ABCDEFGHIJKLMN"})
+    assert report[0]["ok"] is False and "does not fit field 'f'" in report[0]["problem"]
+    out, report, _ = apply(_field_over_text(200, "ABCDEFGHIJKLMN"), [], {"f": "ABCDEFGHIJKLMN"})
+    assert report[0]["ok"] is True
+    again, report, _ = apply(out, [], {"f": "ABCDEFGHIJKLMN"})   # setting the same value again
+    assert report[0]["ok"] is True
+
+def test_field_entries_say_where_to_look():
+    for pdf in (field_form(), rotated_field_form()):
+        _, report, _ = apply(pdf, [], {"name": "A. Example", "agree": True, "colour": "green", "nope": "x"})
+        boxes = {f["name"]: [f["x0"], f["y0"], f["x1"], f["y1"]] for f in facts(pdf, 1)["fields"]}
+        for entry, name in zip(report[:3], ("name", "agree", "colour")):
+            assert entry["page"] == 1 and entry["rect"] == boxes[name]
+        assert report[3]["page"] is None and report[3]["rect"] is None

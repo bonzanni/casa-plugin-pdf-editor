@@ -16,7 +16,7 @@ import os
 
 import pymupdf
 
-from page_facts import font_alias, radio_buttons, to_page, to_page_rect
+from page_facts import font_alias, radio_buttons, to_displayed, to_page, to_page_rect
 
 _FONT_FILE = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
 _FONT_NAME = "dvs"
@@ -189,9 +189,10 @@ def _cp1252(c: str) -> bool:
     return True
 
 
-def _visible_after_flattening(doc: pymupdf.Document, targets: list) -> list[str]:
-    """Set the values on a throwaway copy of ``doc``, flatten it as signing does, and
-    return the text each target widget then shows (whitespace collapsed)."""
+def _field_area_text(doc: pymupdf.Document, targets: list, with_value: bool) -> list[str]:
+    """On a throwaway copy of ``doc``: either set the values or remove the target widgets,
+    flatten as signing does, and return the text inside each target widget's rectangle
+    (whitespace collapsed). Without the widgets, that is the page's own text there."""
     trial = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
     try:
         pages = {}   # widgets hold weak references to their page
@@ -199,8 +200,11 @@ def _visible_after_flattening(doc: pymupdf.Document, targets: list) -> list[str]
             pno = w.parent.number
             page = pages.setdefault(pno, trial[pno])
             tw = next(x for x in page.widgets() if x.xref == w.xref)
-            tw.field_value = v
-            tw.update()
+            if with_value:
+                tw.field_value = v
+                tw.update()
+            else:
+                page.delete_widget(tw)
         trial.bake()
         flat = pymupdf.open(stream=trial.tobytes(), filetype="pdf")
         try:
@@ -250,16 +254,29 @@ def _field(doc: pymupdf.Document, widgets: list, name: str, value) -> set[int]:
     else:
         raise _Problem(f"fields of type {w0.field_type_string} are not supported.")
     if t in (pymupdf.PDF_WIDGET_TYPE_TEXT, pymupdf.PDF_WIDGET_TYPE_COMBOBOX, pymupdf.PDF_WIDGET_TYPE_LISTBOX):
-        # ok means the whole value is readable once the form is flattened (signing flattens it):
-        # the field's appearance cuts off what does not fit, so try it on a copy first.
-        for (_, v), shown in zip(targets, _visible_after_flattening(doc, targets)):
-            if _squash(v) not in _squash(shown):
-                raise _Problem(f"the value does not fit field {name!r} (only {shown!r} would show); "
-                               f"shorten it or write it as a text mark.")
+        # ok means: once flattened (signing flattens), the field's own new text is in its area.
+        # The appearance drops what does not fit; page text already there never counts. This is
+        # not a proof of legibility (a field too low can clip letters): the report gives each
+        # field's page and rect so the assistant can look.
+        before = _field_area_text(doc, targets, with_value=False)
+        after = _field_area_text(doc, targets, with_value=True)
+        for (_, v), was, shown in zip(targets, before, after):
+            if _squash(shown).count(_squash(v)) <= _squash(was).count(_squash(v)):
+                raise _Problem(f"the value does not fit field {name!r} (the flattened field shows "
+                               f"{shown!r}); shorten it or write it as a text mark.")
     for w, v in targets:
         w.field_value = v
         w.update()
     return {w.parent.number + 1 for w, _ in targets}
+
+
+def _where(widgets: list | None) -> dict:
+    """The field's first widget: 1-based page and displayed rectangle, for the assistant to look at."""
+    if not widgets:
+        return {"page": None, "rect": None}
+    w = widgets[0]
+    r = to_displayed(w.parent, w.rect)
+    return {"page": w.parent.number + 1, "rect": [round(v, 1) for v in (r.x0, r.y0, r.x1, r.y1)]}
 
 
 def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[bytes, list[dict], list[int]]:
@@ -308,6 +325,7 @@ def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[byt
                         raise _Problem(f"there is no field named {name!r}; the fields are: {known}.")
                     return _field(doc, by_name[name], name, value)
                 run(f"field {_short(str(name))!r}", fill)
+                report[-1].update(_where(by_name.get(name)))
 
         return doc.tobytes(garbage=3, deflate=True), report, sorted(touched)
     finally:

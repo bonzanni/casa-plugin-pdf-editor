@@ -103,6 +103,18 @@ def test_check_refuses_a_gif_renamed_to_text(tmp_path):
     assert result.returncode == 1 and "notes.txt" in result.stdout + result.stderr
 
 
+def test_check_refuses_a_heic_renamed_to_text(tmp_path):
+    repo = _repo_with(tmp_path, {"photo.txt": b"\x00\x00\x00\x18ftypheic" + b"\x00" * 16})
+    result = _check(repo)
+    assert result.returncode == 1 and "photo.txt" in result.stdout + result.stderr
+
+
+def test_check_refuses_a_bmp_renamed_to_text(tmp_path):
+    repo = _repo_with(tmp_path, {"scan.dat": b"BM\x46\x00\x00\x00\x00\x00\x00\x00\x36\x00" + b"\x00" * 16})
+    result = _check(repo)
+    assert result.returncode == 1 and "scan.dat" in result.stdout + result.stderr
+
+
 def test_check_allows_fonts_and_vendor(tmp_path):
     repo = _repo_with(tmp_path, {"server/fonts/x.png": PNG,
                                  "server/vendor/pkg/doc.pdf": b"%PDF-1.4\n",
