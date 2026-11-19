@@ -1,8 +1,9 @@
 import pymupdf
 import pytest
 
-from fixtures import cropped_form, field_form, flat_form, has_ink, image_only_page, rotated_form
-from page_facts import SCALE, facts, render
+from fixtures import (_flat_doc, cropped_form, dotted_form, field_form, flat_form, has_ink, image_only_page,
+                      rotated_dotted_form, rotated_form)
+from page_facts import SCALE, facts, render, to_displayed
 
 
 def test_facts_report_text_lines_and_drawn_lines():
@@ -54,3 +55,38 @@ def test_page_out_of_range_names_the_valid_range():
         facts(flat_form(), 2)
     with pytest.raises(ValueError, match="1 to 1"):
         render(flat_form(), 0)
+
+
+@pytest.mark.parametrize("make, size", [(flat_form, "595.3 x 841.9"), (rotated_form, "841.9 x 595.3")])
+@pytest.mark.parametrize("region", [(700, 900, 800, 1000), (100, 100, 100, 200), (500, 800, 900, 900)])
+def test_off_page_or_degenerate_region_is_a_plain_refusal(make, size, region):
+    if make is flat_form and region == (500, 800, 900, 900):
+        region = (500, 900, 900, 1000)      # (500, 800, ...) overlaps the upright page
+    with pytest.raises(ValueError, match=size):
+        render(make(), 1, region=region)
+
+def test_dotted_run_and_thin_bar_are_lines():
+    f = facts(dotted_form(), 1)
+    assert len(f["lines"]) == 2 and f["boxes"] == []
+    assert any(abs(l["x0"] - 200) < 0.5 and abs(l["x1"] - 422.6) < 0.5
+               and abs(l["y0"] - 301.4) < 0.5 and abs(l["y1"] - 301.4) < 0.5 for l in f["lines"])
+    assert any(abs(l["x0"] - 72) < 0.5 and abs(l["x1"] - 260) < 0.5
+               and abs(l["y0"] - 400.3) < 0.5 and abs(l["y1"] - 400.3) < 0.5 for l in f["lines"])
+
+def test_dotted_run_on_a_rotated_page_is_vertical_as_displayed():
+    f = facts(rotated_dotted_form(), 1)
+    assert any(abs(l["x0"] - 540.6) < 0.5 and abs(l["x1"] - 540.6) < 0.5
+               and abs(l["y0"] - 200) < 0.5 and abs(l["y1"] - 422.6) < 0.5 for l in f["lines"])
+
+def test_content_hidden_by_the_cropbox_is_not_reported():
+    doc = _flat_doc(); doc[0].set_cropbox(pymupdf.Rect(50, 100, 545, 700))    # hides the signature line and the date
+    f = facts(doc.tobytes(), 1)
+    items = f["text"] + f["lines"] + f["boxes"] + f["fields"]
+    assert items and all(i["y0"] <= f["height"] and i["x0"] <= f["width"] for i in items)
+    assert not any(t["text"].startswith("Date") for t in f["text"]) and len(f["lines"]) == 1
+    g = facts(cropped_form(), 1)
+    assert all(i["y0"] <= g["height"] for i in g["text"] + g["lines"])
+
+def test_to_displayed_takes_a_pair_as_a_point():
+    page = pymupdf.open(stream=rotated_form(), filetype="pdf")[0]
+    assert to_displayed(page, (10, 20)) == to_displayed(page, pymupdf.Point(10, 20))

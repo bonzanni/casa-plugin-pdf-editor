@@ -139,3 +139,24 @@ def has_ink(pix: pymupdf.Pixmap, inset: int = 0) -> bool:
             if sum(samples[i:i + colour]) < 128 * colour:
                 return True
     return False
+
+
+def _dotted_doc():
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    page.insert_text((72, 300), "Name:")
+    for i in range(80):
+        x = 200 + i * 2.8
+        page.draw_rect(pymupdf.Rect(x, 301, x + 1.4, 301.7), color=None, fill=(0, 0, 0))
+    page.draw_rect(pymupdf.Rect(72, 400, 260, 400.6), color=None, fill=(0, 0, 0))
+    return doc
+
+
+def dotted_form() -> bytes:
+    return _dotted_doc().tobytes()
+
+
+def rotated_dotted_form() -> bytes:
+    doc = _dotted_doc()
+    doc[0].set_rotation(90)
+    return doc.tobytes()
