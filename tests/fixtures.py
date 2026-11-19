@@ -208,3 +208,39 @@ def files_under(root: str) -> list[str]:
     """Every regular file below ``root`` (an empty leftover directory does not count)."""
     return sorted(os.path.join(d, f) for d, _, names in os.walk(root) for f in names
                   if os.path.isfile(os.path.join(d, f)))
+
+
+def photo(width: int, height: int, scribble: bool = True) -> bytes:
+    """A synthetic phone photo (JPEG) of ``width`` x ``height`` pixels: grey paper that
+    darkens from left to right, and a blue scribble of a few thick strokes inside the
+    middle third of the image. Deterministic."""
+    row = bytes(v for x in range(width) for v in [215 - 45 * x // max(width - 1, 1)] * 3)
+    paper = pymupdf.Pixmap(pymupdf.csRGB, width, height, row * height, False)
+    doc = pymupdf.open()
+    page = doc.new_page(width=width, height=height)
+    page.insert_image(page.rect, pixmap=paper)
+    if scribble:
+        thick = min(width, height) / 60
+        x0, y0 = width / 3 + 2 * thick, height / 3 + 2 * thick
+        w, h = width / 3 - 4 * thick, height / 3 - 4 * thick
+        strokes = [
+            [(0.0, 0.7), (0.1, 0.1), (0.2, 0.8), (0.3, 0.2), (0.4, 0.75), (0.5, 0.3)],
+            [(0.45, 0.6), (0.6, 0.0), (0.7, 0.9), (0.85, 0.35), (1.0, 0.5)],
+            [(0.05, 1.0), (0.5, 0.85), (0.95, 0.95)],
+        ]
+        for stroke in strokes:
+            page.draw_polyline([(x0 + u * w, y0 + v * h) for u, v in stroke],
+                               color=(30 / 255, 40 / 255, 150 / 255), width=thick)
+    return page.get_pixmap().tobytes("jpg", jpg_quality=90)
+
+
+def landmark_signature() -> bytes:
+    """A 150 x 50 PNG with alpha, transparent except an opaque black block over the
+    left 20 px and an opaque black bar over the top 8 px: shows position and turn."""
+    width, height = 150, 50
+    samples = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            if x < 20 or y < 8:
+                samples[(y * width + x) * 4 + 3] = 255
+    return pymupdf.Pixmap(pymupdf.csRGB, width, height, bytes(samples), True).tobytes("png")
