@@ -1,0 +1,21 @@
+{
+  "name": "pdf-editor",
+  "version": "0.0.1",
+  "description": "PDF editor for the agent (scaffold).",
+  "author": {"name": "Nicola Bonzanni", "url": "https://github.com/bonzanni"},
+  "homepage": "https://github.com/bonzanni/casa-plugin-pdf-editor",
+  "repository": "https://github.com/bonzanni/casa-plugin-pdf-editor",
+  "license": "AGPL-3.0",
+  "keywords": ["casa", "pdf", "mcp"],
+  "casa": {
+    "provides_tools": [
+      "mcp__plugin_pdf-editor_pdf-editor__image_probe"
+    ],
+    "resultContract": {
+      "version": 1,
+      "tools": {
+        "image_probe": {"result": "safe"}
+      }
+    }
+  }
+}

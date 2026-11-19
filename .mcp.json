@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pdf-editor": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/pdf_server.py"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}/server/vendor"
+      }
+    }
+  }
+}
