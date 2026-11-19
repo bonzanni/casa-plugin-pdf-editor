@@ -31,6 +31,7 @@ def test_failed_deposit_publishes_nothing_and_cleans_up(casa_dirs, monkeypatch):
     with pytest.raises(delivery.DeliveryFailed) as e: delivery.send_pdf(flat_form(), "form.pdf", signed=True)
     assert "nothing was sent" in e.value.reason
     assert os.listdir(casa_dirs.outbox) == [] and files_under(casa_dirs.handoff) == []
+    assert os.listdir(os.path.join(casa_dirs.handoff, "pdf-editor")) == []    # no directory left behind
 
 def test_failed_image_deposit_leaves_nothing_staged(casa_dirs, monkeypatch):
     def boom(*a, **k): raise casa_broker.DepositFailed("unavailable")
@@ -46,3 +47,10 @@ def test_missing_outbox_is_a_plain_refusal(casa_dirs, monkeypatch):
 def test_over_20_mb_is_refused_before_anything_is_written(casa_dirs):
     with pytest.raises(delivery.DeliveryFailed): delivery.send_pdf(b"%PDF-" + b"0" * CHAT_MAX_BYTES, "big.pdf", signed=False)
     assert os.listdir(casa_dirs.outbox) == []
+
+@pytest.mark.parametrize("stem", ["x" * 200, "\u00e9" * 95 + ".pdf"])
+def test_label_survives_a_long_file_name(stem):
+    signed, draft = delivery.chat_name(stem, signed=True), delivery.chat_name(stem, signed=False)
+    assert signed.endswith(" (signed).pdf") and draft.endswith(" (draft).pdf") and signed != draft
+    for name in (signed, draft):
+        assert casa_handoff.clean_filename(name, "fallback.pdf") == name

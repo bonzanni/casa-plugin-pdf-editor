@@ -38,9 +38,14 @@ class DeliveryFailed(Exception):
 def chat_name(filename: str, *, signed: bool) -> str:
     """The name the operator sees: ``form.pdf`` becomes ``form (draft).pdf`` or
     ``form (signed).pdf``."""
-    label = "signed" if signed else "draft"
+    suffix = f" ({'signed' if signed else 'draft'}).pdf"
     stem = filename[:-4] if filename.lower().endswith(".pdf") else filename
-    return casa_handoff.clean_filename(f"{stem} ({label}).pdf", f"document ({label}).pdf")
+    # Shorten the stem before the label goes on, so the label is never what is cut.
+    stem = casa_handoff.clean_filename(stem, "document")
+    stem = stem[:casa_handoff.MAX_NAME_CHARS - len(suffix)]
+    while len((stem + suffix).encode("utf-8")) > casa_handoff.MAX_NAME_BYTES:
+        stem = stem[:-1]
+    return casa_handoff.clean_filename(stem.rstrip() + suffix, "document" + suffix)
 
 
 def _stage_in_outbox(data: bytes, ext: str) -> str:
@@ -67,14 +72,24 @@ def _stage_in_outbox(data: bytes, ext: str) -> str:
     return path
 
 
-def _deposit(path: str, *, kind: str, caption: str, filename: str, cleanup: list[str]) -> str:
-    """Deposit the staged file; on a refusal remove every path in ``cleanup``."""
+def _remove_published(path: str) -> None:
+    """Remove a published handoff file and its now-empty directory."""
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+    with contextlib.suppress(OSError):
+        os.rmdir(os.path.dirname(path))
+
+
+def _deposit(path: str, *, kind: str, caption: str, filename: str,
+             published: str | None = None) -> str:
+    """Deposit the staged file; on a refusal remove it and the ``published`` handoff file."""
     try:
         return _deposit_file(FILE_SLOT, path, kind=kind, caption=caption, filename=filename)
     except casa_broker.DepositFailed as exc:
-        for p in cleanup:
-            with contextlib.suppress(OSError):
-                os.unlink(p)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        if published is not None:
+            _remove_published(published)
         raise DeliveryFailed(
             f"Casa did not accept the file for the chat ({exc.code}); nothing was sent."
             + (" The caption must be one short line." if exc.code == "bad_caption" else "")
@@ -97,16 +112,15 @@ def send_pdf(data: bytes, filename: str, *, signed: bool, caption: str = "") -> 
     try:
         staged = _stage_in_outbox(data, ".pdf")
     except DeliveryFailed:
-        with contextlib.suppress(OSError):
-            os.unlink(handoff_path)
+        _remove_published(handoff_path)
         raise
     reference = _deposit(staged, kind="document", caption=caption, filename=name,
-                         cleanup=[staged, handoff_path])
+                         published=handoff_path)
     return {"file": reference, "handoff_path": handoff_path, "sent_as": name}
 
 
 def send_image(png: bytes, name: str, caption: str) -> dict:
     """Stage a PNG in the outbox and deposit it as a photo; nothing goes to handoff."""
     staged = _stage_in_outbox(png, ".png")
-    reference = _deposit(staged, kind="photo", caption=caption, filename=name, cleanup=[staged])
+    reference = _deposit(staged, kind="photo", caption=caption, filename=name)
     return {"file": reference, "sent_as": name}
