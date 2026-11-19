@@ -13,7 +13,8 @@ the new upstream version and recording its SHA above and below.
 
 `server/vendor/` holds `mcp==1.3.0` and `PyMuPDF==1.28.2` with their
 dependencies (cp311 / abi3, manylinux_2_28 x86_64 wheels). `requirements.txt`
-pins the two; the rest resolve from them.
+pins the two, plus `pydantic` and `pydantic-settings` (mcp 1.3.0 does not import
+with newer pydantic); the rest resolve from them.
 
 **Local patch:** `vendor/mcp/server/fastmcp/utilities/func_metadata.py` is copied
 from `casa-plugin-gmail` @ `cbf628b` (one-line backport from mcp 1.30: a
