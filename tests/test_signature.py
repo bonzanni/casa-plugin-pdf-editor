@@ -143,3 +143,14 @@ def test_erase_reports_a_file_it_could_not_remove(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "unlink", lambda p, *a, **k: (_ for _ in ()).throw(PermissionError(13, "Permission denied", p))
                         if str(p).endswith("signature.png") else real(p, *a, **k))
     assert s.erase() == (False, ["signature.png"]) and s.get() is not None
+
+
+def test_stamp_is_unchanged_by_page_fonts_named_like_its_own():
+    from fixtures import blank_page, fonts_premapped, ink_in
+    args = dict(page=1, x=72, y=720, width=180, signer_name="A. Example", when="2026-11-19 14:35")
+    out = draw_stamp(fonts_premapped(("dvs", "sig")), **args)
+    control = draw_stamp(blank_page(), **args)
+    box = (72, 660, 252, 720)
+    assert ink_in(control, 1, box) > 100 and ink_in(out, 1, box) == ink_in(control, 1, box)
+    shown = [pymupdf.open(stream=p, filetype="pdf")[0].get_text() for p in (out, control)]
+    assert shown[0] == shown[1] and "A. Example" in shown[0]

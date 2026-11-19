@@ -261,9 +261,12 @@ def _erase_result(lines: list[str], left: list[str], **counts) -> str:
                 **counts})
 
 
-def _documents_line(removed: int) -> str:
-    return (f"Deleted {removed} working document{'s' if removed != 1 else ''} and all their "
-            "versions." if removed else "There were no working documents.")
+def _documents_line(removed: int, left: int) -> str:
+    if removed == 1:
+        return "Deleted 1 working document and all its versions."
+    if removed:
+        return f"Deleted {removed} working documents and all their versions."
+    return "No working document was deleted." if left else "There were no working documents."
 
 
 @mcp.tool()
@@ -272,7 +275,7 @@ def erase_pdf_editor() -> str:
     Returns Casa's erase result: erasure complete or incomplete, and a report."""
     removed, docs_left = _docs().erase_documents()
     signature_removed, sig_left = _signatures().erase()
-    lines = [_documents_line(removed),
+    lines = [_documents_line(removed, len(docs_left)),
              "Deleted the stored signature." if signature_removed else "No signature was stored."]
     left = [f"documents/{n}" for n in docs_left] + [f"signature/{n}" for n in sig_left]
     return _erase_result(lines, left, documents_removed=removed,
@@ -284,7 +287,7 @@ def erase_pdf_documents() -> str:
     """Delete every working document; the stored signature is kept. Returns Casa's erase
     result: erasure complete or incomplete, and a report."""
     removed, left = _docs().erase_documents()
-    lines = [_documents_line(removed), "The stored signature is kept."]
+    lines = [_documents_line(removed, len(left)), "The stored signature is kept."]
     return _erase_result(lines, [f"documents/{n}" for n in left], documents_removed=removed)
 
 

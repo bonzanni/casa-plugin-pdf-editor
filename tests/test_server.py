@@ -215,6 +215,9 @@ def test_an_entry_that_cannot_be_removed_makes_the_erase_incomplete(server, tmp_
         erased = _erase_result(call(name))
         assert erased["erasure"] == "incomplete" and doc in erased["report"], name
         assert erased["documents_removed"] == (1 if name == "erase_pdf_documents" else 0)
+        assert "There were no working documents" not in erased["report"]
+        assert ("Deleted 1 working document and all its versions." if name == "erase_pdf_documents"
+                else "No working document was deleted.") in erased["report"]
     assert os.listdir(tmp_path / "data" / "documents") == [doc]
     with pytest.raises(Exception, match="no open document"): call("look_at_page", doc_id=other)
 

@@ -16,7 +16,7 @@ import os
 
 import pymupdf
 
-from page_facts import radio_buttons, to_page, to_page_rect
+from page_facts import font_alias, radio_buttons, to_page, to_page_rect
 
 _FONT_FILE = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
 _FONT_NAME = "dvs"
@@ -116,7 +116,8 @@ def _text(page: pymupdf.Page, mark: dict, x: float, y: float) -> None:
                                f"it needs {_FONT.text_length(text, fontsize=_MIN_SIZE):.1f} points.")
             width = _FONT.text_length(text, fontsize=size)
     _inside(page, x, y - _FONT.ascender * size, x + width, y - _FONT.descender * size)
-    page.insert_text(to_page(page, x, y), text, fontname=_FONT_NAME, fontfile=_FONT_FILE,
+    page.insert_text(to_page(page, x, y), text, fontname=font_alias(page, _FONT_NAME, _FONT_FILE),
+                     fontfile=_FONT_FILE,
                      fontsize=size, color=_BLACK, rotate=page.rotation)
 
 
@@ -188,7 +189,33 @@ def _cp1252(c: str) -> bool:
     return True
 
 
-def _field(widgets: list, value) -> set[int]:
+def _visible_after_flattening(doc: pymupdf.Document, targets: list) -> list[str]:
+    """Set the values on a throwaway copy of ``doc``, flatten it as signing does, and
+    return the text each target widget then shows (whitespace collapsed)."""
+    trial = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
+    try:
+        pages = {}   # widgets hold weak references to their page
+        for w, v in targets:
+            pno = w.parent.number
+            page = pages.setdefault(pno, trial[pno])
+            tw = next(x for x in page.widgets() if x.xref == w.xref)
+            tw.field_value = v
+            tw.update()
+        trial.bake()
+        flat = pymupdf.open(stream=trial.tobytes(), filetype="pdf")
+        try:
+            return [" ".join(flat[w.parent.number].get_text(clip=w.rect).split()) for w, _ in targets]
+        finally:
+            flat.close()
+    finally:
+        trial.close()
+
+
+def _squash(text: str) -> str:
+    return "".join(text.split())
+
+
+def _field(doc: pymupdf.Document, widgets: list, name: str, value) -> set[int]:
     w0 = widgets[0]
     t = w0.field_type
     if t == pymupdf.PDF_WIDGET_TYPE_SIGNATURE:
@@ -222,6 +249,13 @@ def _field(widgets: list, value) -> set[int]:
         targets = [(w, value) for w in widgets]
     else:
         raise _Problem(f"fields of type {w0.field_type_string} are not supported.")
+    if t in (pymupdf.PDF_WIDGET_TYPE_TEXT, pymupdf.PDF_WIDGET_TYPE_COMBOBOX, pymupdf.PDF_WIDGET_TYPE_LISTBOX):
+        # ok means the whole value is readable once the form is flattened (signing flattens it):
+        # the field's appearance cuts off what does not fit, so try it on a copy first.
+        for (_, v), shown in zip(targets, _visible_after_flattening(doc, targets)):
+            if _squash(v) not in _squash(shown):
+                raise _Problem(f"the value does not fit field {name!r} (only {shown!r} would show); "
+                               f"shorten it or write it as a text mark.")
     for w, v in targets:
         w.field_value = v
         w.update()
@@ -272,7 +306,7 @@ def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[byt
                     if name not in by_name:
                         known = ", ".join(by_name) or "none; this document has no form fields"
                         raise _Problem(f"there is no field named {name!r}; the fields are: {known}.")
-                    return _field(by_name[name], value)
+                    return _field(doc, by_name[name], name, value)
                 run(f"field {_short(str(name))!r}", fill)
 
         return doc.tobytes(garbage=3, deflate=True), report, sorted(touched)

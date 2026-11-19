@@ -11,6 +11,7 @@ it means.
 """
 from __future__ import annotations
 
+import functools
 import math
 import os
 
@@ -52,6 +53,30 @@ def to_displayed(page: pymupdf.Page, obj):
     if isinstance(obj, pymupdf.Point) or (not isinstance(obj, pymupdf.Rect) and len(obj) == 2):
         return pymupdf.Point(obj) * page.rotation_matrix
     return (pymupdf.Rect(obj) * page.rotation_matrix).normalize()
+
+
+@functools.lru_cache(maxsize=None)
+def _base_font(fontfile: str) -> str:
+    return pymupdf.Font(fontfile=fontfile).name
+
+
+def font_alias(page: pymupdf.Page, wanted: str, fontfile: str) -> str:
+    """The resource name to register ``fontfile`` under on ``page``.
+
+    ``insert_text``/``insert_font`` reuse whatever font a page already maps to a name,
+    so a name the page uses for another font would draw our text in that font. Returns
+    ``wanted`` when the page has no font of that name or only the plugin's own (same base
+    font, embedded TrueType, from an earlier write); otherwise ``wanted`` plus the first
+    number not in use."""
+    fonts = page.get_fonts(full=True)   # (xref, ext, type, basefont, name, encoding, referencer)
+    used = {f[4] for f in fonts}
+    same = [f for f in fonts if f[4] == wanted]
+    if all(f[3] == _base_font(fontfile) and f[1] == "ttf" and f[2] == "Type0" for f in same):
+        return wanted
+    n = 1
+    while f"{wanted}{n}" in used:
+        n += 1
+    return f"{wanted}{n}"
 
 
 def _open_page(pdf: bytes, page: int) -> tuple[pymupdf.Document, pymupdf.Page]:

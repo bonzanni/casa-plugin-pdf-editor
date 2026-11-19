@@ -16,7 +16,16 @@ import sys
 ALLOWED_PREFIXES = ("server/vendor/", "server/fonts/")
 EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".heic", ".gif", ".tif", ".tiff",
               ".bmp", ".webp"}
-SIGNATURES = (b"%PDF", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
+SIGNATURES = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF8", b"II*\0", b"MM\0*")
+PDF_WINDOW = 1024   # readers accept the PDF header anywhere in the first 1024 bytes
+
+
+def _is_document(head: bytes, tail: bytes) -> bool:
+    """By the first bytes; a PDF header after leading junk counts when the file also ends
+    with %%EOF (so source files that merely mention the header do not)."""
+    return (head.startswith(SIGNATURES) or head.startswith(b"%PDF")
+            or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+            or (b"%PDF-" in head and b"%%EOF" in tail))
 
 
 def _git(*args: str) -> str:
@@ -36,8 +45,10 @@ def offending(root: str, paths: list[str]) -> list[str]:
         if not os.path.isfile(full) or os.path.islink(full):
             continue
         with open(full, "rb") as fh:
-            head = fh.read(8)
-        if head.startswith(SIGNATURES):
+            head = fh.read(PDF_WINDOW)
+            fh.seek(max(0, os.path.getsize(full) - PDF_WINDOW))
+            tail = fh.read()
+        if _is_document(head, tail):
             found.append(rel)
     return found
 

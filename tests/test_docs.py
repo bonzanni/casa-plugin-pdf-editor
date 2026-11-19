@@ -91,6 +91,18 @@ def test_check_refuses_a_jpeg_by_its_bytes_and_an_upper_case_extension(tmp_path)
     assert "a.bin" in out and "Scan.HEIC" in out
 
 
+def test_check_refuses_a_pdf_with_leading_junk(tmp_path):
+    repo = _repo_with(tmp_path, {"data.bin": b"\x00junk" * 50 + b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"})
+    result = _check(repo)
+    assert result.returncode == 1 and "data.bin" in result.stdout + result.stderr
+
+
+def test_check_refuses_a_gif_renamed_to_text(tmp_path):
+    repo = _repo_with(tmp_path, {"notes.txt": b"GIF89a" + b"\x00" * 16})
+    result = _check(repo)
+    assert result.returncode == 1 and "notes.txt" in result.stdout + result.stderr
+
+
 def test_check_allows_fonts_and_vendor(tmp_path):
     repo = _repo_with(tmp_path, {"server/fonts/x.png": PNG,
                                  "server/vendor/pkg/doc.pdf": b"%PDF-1.4\n",

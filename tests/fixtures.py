@@ -274,3 +274,33 @@ def with_orientation(jpg: bytes, orientation: int) -> bytes:
             + struct.pack(">HHIHH", 0x0112, 3, 1, orientation, 0) + b"\x00\x00\x00\x00")
     body = b"Exif\x00\x00" + tiff
     return jpg[:2] + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + jpg[2:]
+
+
+def ink_in(pdf: bytes, page: int, rect) -> int:
+    """Dark pixels (grey below 128) in the displayed rectangle ``rect`` of ``page`` (1-based),
+    rendered at 2 pixels per point."""
+    doc = pymupdf.open(stream=pdf, filetype="pdf")
+    try:
+        pix = doc[page - 1].get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=pymupdf.Rect(rect), alpha=False,
+                                       colorspace=pymupdf.csGRAY)
+        return sum(1 for v in pix.samples if v < 128)
+    finally:
+        doc.close()
+
+
+def fonts_premapped(names: tuple[str, ...] = ("dvs",)) -> bytes:
+    """A blank page whose resources already map each of ``names`` to Courier, as a PDF made
+    elsewhere may do."""
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    xref = doc.get_new_xref()
+    doc.update_object(xref, "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+    fonts = " ".join(f"/{n} {xref} 0 R" for n in names)
+    doc.xref_set_key(page.xref, "Resources", f"<< /Font << {fonts} >> >>")
+    return doc.tobytes()
+
+
+def blank_page() -> bytes:
+    doc = pymupdf.open()
+    _new_page(doc)
+    return doc.tobytes()
