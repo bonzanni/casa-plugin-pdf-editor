@@ -202,3 +202,9 @@ def radio_form() -> bytes:
         doc.xref_set_key(k, "AP", f"<< /N << /Off {off} /{state} {on} >> >>")
     doc.xref_set_key(doc.pdf_catalog(), "AcroForm/Fields", f"[{parent} 0 R]")
     return doc.tobytes()
+
+
+def files_under(root: str) -> list[str]:
+    """Every regular file below ``root`` (an empty leftover directory does not count)."""
+    return sorted(os.path.join(d, f) for d, _, names in os.walk(root) for f in names
+                  if os.path.isfile(os.path.join(d, f)))

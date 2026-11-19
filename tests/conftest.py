@@ -22,3 +22,15 @@ def _restore_handoff_env(monkeypatch):
 def store(tmp_path):
     from documents import Store
     return Store(str(tmp_path / "data"))
+
+
+@pytest.fixture
+def casa_dirs(tmp_path, monkeypatch):
+    """Temp outbox and handoff roots, with Casa's two env vars pointing at them."""
+    import types
+    outbox, handoff = tmp_path / "outbox", tmp_path / "handoff"
+    outbox.mkdir()
+    handoff.mkdir()
+    monkeypatch.setenv("CASA_PLUGIN_OUTBOX_DIR", str(outbox))
+    monkeypatch.setenv("CASA_HANDOFF_DIR", str(handoff))
+    return types.SimpleNamespace(outbox=str(outbox), handoff=str(handoff))
