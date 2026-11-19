@@ -3,7 +3,8 @@ import time
 import pymupdf
 import pytest
 
-from fixtures import cropped_form, field_form, flat_form, landmark_signature, photo, rotated_form
+from fixtures import (cropped_form, field_form, flat_form, landmark_signature, photo, rotated_form, sideways,
+                      white_field_form, with_orientation)
 from signature import SignatureStore, aspect, clean, draw_handwritten, draw_stamp
 
 
@@ -58,5 +59,72 @@ def test_stamp_carries_caption_name_and_time():
     text = pymupdf.open(stream=out, filetype="pdf")[0].get_text()
     assert "SIGNED ELECTRONICALLY" in text and text.count("A. Example") == 2 and "2026-11-19 14:35" in text
 
+def test_stamp_name_is_dark_blue_ink():
+    out = draw_stamp(flat_form(), page=1, x=72, y=720, width=180, signer_name="A. Example", when="x")
+    spans = [s for b in pymupdf.open(stream=out, filetype="pdf")[0].get_text("dict")["blocks"] for l in b.get("lines", ()) for s in l["spans"]]
+    big = max((s for s in spans if s["text"] == "A. Example"), key=lambda s: s["size"])
+    assert all(abs(a - b) <= 2 for a, b in zip(pymupdf.sRGB_to_rgb(big["color"]), (26, 41, 107)))
+
 def test_off_page_signature_is_refused():
     with pytest.raises(ValueError): draw_stamp(flat_form(), page=1, x=560, y=720, width=180, signer_name="A", when="x")
+
+
+def _ink_grid(png, cols=24, rows=18):
+    """Which cells of a coarse grid over the image hold ink (alpha over 64)."""
+    pix = pymupdf.Pixmap(pymupdf.Pixmap(png), cols, rows)
+    return [pix.pixel(x, y)[3] > 64 for y in range(rows) for x in range(cols)]
+
+def _same_signature(a, b):
+    pa, pb = pymupdf.Pixmap(a), pymupdf.Pixmap(b)
+    assert abs(pa.width - pb.width) <= 4 and abs(pa.height - pb.height) <= 4
+    ga, gb = _ink_grid(a), _ink_grid(b)
+    assert sum(x == y for x, y in zip(ga, gb)) >= 0.95 * len(ga)
+
+def test_clean_follows_the_exif_orientation():
+    p = photo(1200, 900)
+    _same_signature(clean(with_orientation(sideways(p), 6)), clean(p))
+
+def test_clean_turns_a_sideways_photo_on_request():
+    p = photo(1200, 900)
+    a, b = pymupdf.Pixmap(clean(p)), pymupdf.Pixmap(clean(p, rotate=90))
+    assert abs(a.width - b.height) <= 4 and abs(a.height - b.width) <= 4
+    _same_signature(clean(sideways(p), rotate=90), clean(p))
+    with pytest.raises(ValueError): clean(p, rotate=45)
+
+def test_clean_takes_png_and_refuses_too_large_or_unknown_input():
+    png = pymupdf.Pixmap(photo(800, 600)).tobytes("png")
+    assert pymupdf.Pixmap(clean(png)).alpha
+    for bad in (b"not an image", flat_form(), b"\xff\xd8" + b"\x00" * (30 * 2**20)):
+        with pytest.raises(ValueError): clean(bad)
+
+def test_commit_stores_the_approved_bytes_even_if_a_new_preview_lands(tmp_path, monkeypatch):
+    s = SignatureStore(str(tmp_path)); approved = clean(photo(800, 600)); pid = s.set_pending(approved)
+    newer = clean(photo(900, 500)); real_read = SignatureStore._read; calls = []
+    def read(path):
+        data = real_read(path)
+        if path.endswith("pending.png") and not calls:
+            calls.append(1); s.set_pending(newer)     # lands between the check and the store
+        return data
+    monkeypatch.setattr(s, "_read", read)
+    assert s.commit(pid) is True
+    monkeypatch.undo()
+    assert s.get() == approved and s.status()["pending"] is True
+    assert s.commit(SignatureStore(str(tmp_path)).set_pending(newer)) is True and s.get() == newer
+
+def test_store_tightens_an_existing_directory(tmp_path):
+    (tmp_path / "signature").mkdir(mode=0o755); (tmp_path / "signature").chmod(0o755)
+    SignatureStore(str(tmp_path)).set_pending(clean(photo(800, 600)))
+    assert (tmp_path / "signature").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "signature" / "pending.png").stat().st_mode & 0o777 == 0o600
+
+def _inked(pix):
+    return sum(1 for y in range(pix.height) for x in range(pix.width) if min(pix.pixel(x, y)[:3]) < 160)
+
+def test_both_looks_show_over_a_white_form_field():
+    out = draw_handwritten(white_field_form(), landmark_signature(), page=1, x=150, y=725, width=150)
+    page = pymupdf.open(stream=out, filetype="pdf")[0]
+    assert list(page.widgets()) == []
+    assert _inked(page.get_pixmap(clip=pymupdf.Rect(150, 685, 300, 725))) > 600    # the 20 pt block alone is ~800 px
+    out = draw_stamp(white_field_form(), page=1, x=150, y=725, width=150, signer_name="A. Example", when="2026-11-19 14:35")
+    shot = pymupdf.open(stream=out, filetype="pdf")[0].get_pixmap(clip=pymupdf.Rect(150, 690, 300, 725))
+    assert _inked(shot) > 200                                                        # name and small print inside the field

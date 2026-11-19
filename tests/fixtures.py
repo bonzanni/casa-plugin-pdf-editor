@@ -1,6 +1,7 @@
 """PDF fixtures generated in code. Each call builds a new PDF (fresh /ID), so a
 test that compares bytes keeps the bytes it made in a variable."""
 import os
+import struct
 
 import pymupdf
 
@@ -244,3 +245,32 @@ def landmark_signature() -> bytes:
             if x < 20 or y < 8:
                 samples[(y * width + x) * 4 + 3] = 255
     return pymupdf.Pixmap(pymupdf.csRGB, width, height, bytes(samples), True).tobytes("png")
+
+
+def white_field_form() -> bytes:
+    """A text field with an opaque white background at (140, 680, 340, 730)."""
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    w = pymupdf.Widget()
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w.field_name = "sign_here"
+    w.fill_color = (1, 1, 1)
+    w.rect = pymupdf.Rect(140, 680, 340, 730)
+    page.add_widget(w)
+    return doc.tobytes()
+
+
+def sideways(jpg: bytes) -> bytes:
+    """The JPEG ``jpg`` with its pixels turned 90 degrees counter-clockwise, same resolution."""
+    doc = pymupdf.open(stream=jpg, filetype="jpg")
+    page = doc[0]
+    scale = page.get_image_info()[0]["width"] / page.rect.width
+    return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale).prerotate(270)).tobytes("jpg", jpg_quality=90)
+
+
+def with_orientation(jpg: bytes, orientation: int) -> bytes:
+    """``jpg`` with an Exif APP1 segment carrying only the Orientation tag."""
+    tiff = (b"MM\x00*\x00\x00\x00\x08" + struct.pack(">H", 1)
+            + struct.pack(">HHIHH", 0x0112, 3, 1, orientation, 0) + b"\x00\x00\x00\x00")
+    body = b"Exif\x00\x00" + tiff
+    return jpg[:2] + b"\xff\xe1" + struct.pack(">H", len(body) + 2) + body + jpg[2:]

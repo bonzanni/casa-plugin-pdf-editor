@@ -10,7 +10,7 @@ signature (the cleaned image) and a stamp (a framed box with the name in a
 handwriting font). Either is placed with ``to_page_rect`` and
 ``rotate=page.rotation``, measured on PyMuPDF 1.28.2 to come out upright as
 displayed for rotations 0, 90, 180 and 270. Form fields and annotations are then
-baked into the page content.
+baked into the page content first, so the mark is drawn over them.
 """
 from __future__ import annotations
 
@@ -34,10 +34,12 @@ _TILES = 25             # paper estimate: about this many tiles along the longes
 _PAPER_RANK = 0.9       # a tile's paper brightness: this rank of its sorted grey values
 _SEGMENT = 8            # the paper estimate is interpolated in runs of this many pixels
 _FAINT, _FULL = 0.15, 0.45   # relative darkness: transparent below _FAINT, opaque from _FULL
+_MAX_BYTES = 30 * 2**20  # a larger photo is refused before decoding
 _MIN_INK = 0.0005       # less ink than this fraction of the photo is a blank sheet
 _MARGIN = 0.03          # crop margin, as a fraction of the ink's longest side
 
 _BLUE = (0.16, 0.31, 0.66)
+_INK = (0.10, 0.16, 0.42)      # the stamp's large name: dark blue ink
 _CAPTION = "SIGNED ELECTRONICALLY"
 
 
@@ -54,24 +56,36 @@ def _alpha_table(paper: int) -> bytes:
 _TABLES = [_alpha_table(p) for p in range(256)]
 
 
-def _decode(photo: bytes) -> pymupdf.Pixmap:
+def _decode(photo: bytes, rotate: int) -> pymupdf.Pixmap:
+    """The photo as RGB without alpha (transparency on white), upright as its EXIF
+    orientation says, turned ``rotate`` degrees clockwise, longest side at most _WORK_MAX.
+
+    Opened as an image document: unlike ``Pixmap(bytes)`` and ``insert_image``, that
+    applies the EXIF orientation (measured on 1.28.2)."""
+    if len(photo) > _MAX_BYTES:
+        raise ValueError(f"The photo is too large ({len(photo) // 2**20} MB); send one under "
+                         f"{_MAX_BYTES // 2**20} MB as JPEG or PNG.")
+    unsupported = "This image format is not supported; send the signature photo as JPEG or PNG."
+    doc = None
     try:
-        pix = pymupdf.Pixmap(photo)
-    except Exception:
-        raise ValueError("This image format is not supported; send the signature photo as JPEG or PNG.") from None
-    if pix.width < 1 or pix.height < 1:
-        raise ValueError("The image is empty; send the signature photo as JPEG or PNG.")
-    # One path for every input: draw it on a scratch page at the working size and render.
-    # That downscales, converts any colour space to RGB and puts transparency on white.
-    scale = min(1.0, _WORK_MAX / max(pix.width, pix.height))
-    w, h = max(1, round(pix.width * scale)), max(1, round(pix.height * scale))
-    sheet = pymupdf.open()
-    try:
-        page = sheet.new_page(width=w, height=h)
-        page.insert_image(page.rect, pixmap=pix)
-        return page.get_pixmap(alpha=False)
+        doc = pymupdf.open(stream=photo, filetype="jpg")   # the type is sniffed; this is a hint
+        if doc.is_pdf or doc.metadata.get("format") != "Image" or doc.page_count < 1:
+            raise ValueError(unsupported)
+        page = doc[0]
+        info = page.get_image_info()
+        longest_pt = max(page.rect.width, page.rect.height)
+        longest_px = max(info[0]["width"], info[0]["height"]) if info else longest_pt
+        if longest_pt <= 0 or longest_px < 1:
+            raise ValueError("The image is empty; send the signature photo as JPEG or PNG.")
+        scale = min(longest_px, _WORK_MAX) / longest_pt
+        return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale).prerotate(rotate), alpha=False)
+    except (ValueError, MemoryError):
+        raise
+    except Exception:   # MuPDF's errors for bytes it cannot read as an image
+        raise ValueError(unsupported) from None
     finally:
-        sheet.close()
+        if doc is not None:
+            doc.close()
 
 
 def _paper(grey: bytes, w: int, h: int) -> tuple[list[list[int]], int]:
@@ -133,10 +147,13 @@ def _ink_box(alpha: bytes, w: int, h: int) -> tuple[int, int, int, int] | None:
     return None if top is None else (left, top, right, bottom)
 
 
-def clean(photo: bytes) -> bytes:
+def clean(photo: bytes, *, rotate: int = 0) -> bytes:
     """PNG with alpha of the ink in ``photo``, the paper made transparent, cropped to the
-    ink with a small margin, longest side at most 1200 px."""
-    rgb = _decode(photo)
+    ink with a small margin, longest side at most 1200 px. ``rotate`` (0, 90, 180 or 270)
+    turns the photo clockwise after decoding, for a photo that came out sideways."""
+    if isinstance(rotate, bool) or rotate not in (0, 90, 180, 270):
+        raise ValueError(f"rotate must be 0, 90, 180 or 270 (degrees clockwise), not {rotate!r}.")
+    rgb = _decode(photo, rotate)
     w, h = rgb.width, rgb.height
     alpha = _alpha(pymupdf.Pixmap(pymupdf.csGRAY, rgb).samples, w, h)
     box = _ink_box(alpha, w, h)
@@ -204,26 +221,39 @@ class SignatureStore:
 
     def set_pending(self, cleaned: bytes) -> str:
         """Hold ``cleaned`` as the pending preview (replacing any earlier one); its preview id."""
+        self._write(self._pending, cleaned)
+        return _preview_id(cleaned)
+
+    def _write(self, path: str, data: bytes) -> None:
+        """Write ``data`` to ``path`` atomically: a 0600 temp file, then ``os.replace``."""
         os.makedirs(self._dir, mode=0o700, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=".pending-", suffix=".tmp")   # mode 0600
+        os.chmod(self._dir, 0o700)
+        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=".write-", suffix=".tmp")   # mode 0600
         try:
             with os.fdopen(fd, "wb") as f:
-                f.write(cleaned)
-            os.replace(tmp, self._pending)
+                f.write(data)
+            os.replace(tmp, path)
         except BaseException:
             try:
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
             raise
-        return _preview_id(cleaned)
 
     def commit(self, preview_id: str) -> bool:
-        """Store the pending signature if its id is ``preview_id``; False otherwise."""
+        """Store the pending signature if its id is ``preview_id``; False otherwise.
+
+        Stores the bytes it checked, never whatever the pending file holds by then: a
+        ``set_pending`` landing meanwhile stays pending and is not stored."""
         pending = self._read(self._pending)
         if pending is None or _preview_id(pending) != preview_id:
             return False
-        os.replace(self._pending, self._stored)
+        self._write(self._stored, pending)
+        if self._read(self._pending) == pending:
+            try:
+                os.unlink(self._pending)
+            except FileNotFoundError:
+                pass
         return True
 
     def get(self) -> bytes | None:
@@ -261,19 +291,16 @@ def _place(page: pymupdf.Page, x: float, y: float,
     return to_page_rect(page, shown.x0, shown.y0, shown.x1, shown.y1)
 
 
-def _finish(doc: pymupdf.Document) -> bytes:
-    doc.bake()
-    return doc.tobytes(garbage=3, deflate=True)
-
-
 def draw_handwritten(pdf: bytes, sig_png: bytes, *, page: int, x: float, y: float, width: float) -> bytes:
     """``sig_png`` with its bottom-left at displayed (x, y), ``width`` points wide, aspect
     kept, upright as displayed; fields and annotations baked. New bytes; ``pdf`` is untouched."""
     doc, pg = _open_page(pdf, page)
     try:
         rect = _place(pg, x, y, width, width * aspect(sig_png), "signature")
-        pg.insert_image(rect, stream=sig_png, rotate=pg.rotation)
-        return _finish(doc)
+        rotation = pg.rotation
+        doc.bake()   # first: baked field appearances are appended to the content, over the mark
+        doc[page - 1].insert_image(rect, stream=sig_png, rotate=rotation)
+        return doc.tobytes(garbage=3, deflate=True)
     finally:
         doc.close()
 
@@ -310,7 +337,7 @@ def _stamp(width: float, height: float, signer_name: str, when: str) -> pymupdf.
     centre = (top + height) / 2
     baseline = centre + (name_font.ascender + name_font.descender) / 2 * size
     page.insert_text(((width - name_font.text_length(signer_name, size)) / 2, baseline),
-                     signer_name, fontname="sig", fontsize=size, color=(0, 0, 0))
+                     signer_name, fontname="sig", fontsize=size, color=_INK)
 
     small, inset = height * 0.09, width * 0.03
     for text, base in ((signer_name, height - inset - small * 1.25), (when, height - inset)):
@@ -327,11 +354,13 @@ def draw_stamp(pdf: bytes, *, page: int, x: float, y: float, width: float,
     doc, pg = _open_page(pdf, page)
     try:
         rect = _place(pg, x, y, width, width / 3, "stamp")
+        rotation = pg.rotation
         stamp = _stamp(width, width / 3, signer_name, when)
         try:
-            pg.show_pdf_page(rect, stamp, 0, rotate=pg.rotation)
+            doc.bake()   # first: baked field appearances are appended to the content, over the mark
+            doc[page - 1].show_pdf_page(rect, stamp, 0, rotate=rotation)
         finally:
             stamp.close()
-        return _finish(doc)
+        return doc.tobytes(garbage=3, deflate=True)
     finally:
         doc.close()
