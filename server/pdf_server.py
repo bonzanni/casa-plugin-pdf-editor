@@ -216,8 +216,18 @@ def preview_signature(path: str, rotate: int = 0) -> str:
     except casa_handoff.HandoffError as exc:
         raise ValueError(f"That path is not a file in the handoff folder ({exc}).") from None
     cleaned = signature.clean(photo, rotate=rotate)
-    sent = delivery.send_image(signature.preview(cleaned), PREVIEW_NAME, PREVIEW_CAPTION)
-    return _ok({**sent, "preview_id": _signatures().set_pending(cleaned)})
+    png = signature.preview(cleaned)
+    sigs = _signatures()
+    preview_id = sigs.set_pending(cleaned)   # held first: the delivery is last, it cannot be taken back
+    try:
+        sent = delivery.send_image(png, PREVIEW_NAME, PREVIEW_CAPTION)
+    except BaseException as exc:
+        sigs.clear_pending()                 # no pending preview the operator never saw
+        if isinstance(exc, delivery.DeliveryFailed):
+            raise ValueError(f"{exc.reason} The preview could not be sent; nothing is pending, "
+                             "send the photo again.") from None
+        raise
+    return _ok({**sent, "preview_id": preview_id})
 
 
 @mcp.tool()

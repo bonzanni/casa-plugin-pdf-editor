@@ -263,10 +263,17 @@ def _field(doc: pymupdf.Document, widgets: list, name: str, value) -> set[int]:
         # The appearance drops what does not fit. This is not a proof of legibility (a field too
         # low can clip letters): the report gives the field's page and rect so the assistant can
         # look. A listbox shows its options rather than its value, so it is not checked.
-        w, v = targets[0]
-        shown = _shown_alone(doc, w, v)
-        if _squash(shown) != _squash(v):
-            raise _Problem(f"the value does not fit field {name!r} (only {shown!r} would show); "
+        # Every widget of the field is checked before any is set: one widget can clip what
+        # another shows whole.
+        cut = []
+        for w, v in targets:
+            shown = _shown_alone(doc, w, v)
+            if _squash(shown) != _squash(v):
+                spot = _spot(w)
+                where = f" in its widget on page {spot['page']} at {spot['rect']}" if len(targets) > 1 else ""
+                cut.append(f"only {shown!r} would show{where}")
+        if cut:
+            raise _Problem(f"the value does not fit field {name!r} ({'; '.join(cut)}); "
                            f"shorten it or write it as a text mark.")
     for w, v in targets:
         w.field_value = v
@@ -274,13 +281,21 @@ def _field(doc: pymupdf.Document, widgets: list, name: str, value) -> set[int]:
     return {w.parent.number + 1 for w, _ in targets}
 
 
-def _where(widgets: list | None) -> dict:
-    """The field's first widget: 1-based page and displayed rectangle, for the assistant to look at."""
-    if not widgets:
-        return {"page": None, "rect": None}
-    w = widgets[0]
+def _spot(w) -> dict:
+    """A widget's 1-based page and displayed rectangle."""
     r = to_displayed(w.parent, w.rect)
     return {"page": w.parent.number + 1, "rect": [round(v, 1) for v in (r.x0, r.y0, r.x1, r.y1)]}
+
+
+def _where(widgets: list | None) -> dict:
+    """Where to look: the field's first widget's page and displayed rectangle, and every
+    widget's under ``widgets`` when the field has more than one."""
+    if not widgets:
+        return {"page": None, "rect": None}
+    out = _spot(widgets[0])
+    if len(widgets) > 1:
+        out["widgets"] = [_spot(w) for w in widgets]
+    return out
 
 
 def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[bytes, list[dict], list[int]]:

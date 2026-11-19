@@ -101,6 +101,14 @@ def offset_rotated_form() -> bytes:
     return doc.tobytes()
 
 
+def userunit_form(rotation: int = 0) -> bytes:
+    """The flat form with /UserUnit 2 (one unit is two points), optionally rotated."""
+    doc = _flat_doc()
+    doc.xref_set_key(doc[0].xref, "UserUnit", "2")
+    doc[0].set_rotation(rotation)
+    return doc.tobytes()
+
+
 def signed_flag_form(flags: int) -> bytes:
     doc = _field_doc()
     cat = doc.pdf_catalog()

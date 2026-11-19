@@ -5,7 +5,7 @@ import pytest
 
 from documents import RETENTION_S, Refused
 from fixtures import (cropped_form, cropped_rotated_form, encrypted, flat_form, in_handoff,
-                      offset_form, offset_rotated_form, rotated_form, signed_flag_form)
+                      offset_form, offset_rotated_form, rotated_form, signed_flag_form, userunit_form)
 
 
 def test_open_copies_and_never_touches_the_source(store, tmp_path):
@@ -34,6 +34,9 @@ def test_signed_version_and_latest_unsigned(store, tmp_path):
     (lambda t: in_handoff(t, b"\xff\xd8\xff not a pdf"), "not a PDF"),
     (lambda t: in_handoff(t, cropped_rotated_form()), "rotated"),
     (lambda t: in_handoff(t, offset_rotated_form()), "rotated"),
+    (lambda t: in_handoff(t, userunit_form(90)), "rotated"),
+    (lambda t: in_handoff(t, userunit_form(180)), "rotated"),
+    (lambda t: in_handoff(t, userunit_form(270)), "rotated"),
     (lambda t: str(t / "elsewhere.pdf"), "handoff"),
 ])
 def test_refusals_store_nothing(store, tmp_path, make, word):
@@ -41,7 +44,7 @@ def test_refusals_store_nothing(store, tmp_path, make, word):
     assert word in e.value.reason and not os.listdir(store.root + "/documents")
 
 def test_unrotated_offset_and_cropped_pages_open(store, tmp_path):
-    for make in (cropped_form, offset_form, rotated_form):
+    for make in (cropped_form, offset_form, rotated_form, userunit_form):
         assert store.open(in_handoff(tmp_path, make())).pages == 1
 
 @pytest.mark.parametrize("flags, expected", [(1, True), (3, True), (0, False)])
@@ -107,3 +110,32 @@ def test_a_failed_version_write_leaves_the_folder_as_it_was(store, tmp_path, mon
         store.undo(doc.id)
     monkeypatch.undo()
     assert {n: open(os.path.join(folder, n), "rb").read() for n in os.listdir(folder)} == before
+
+
+def test_files_a_crash_left_outside_the_history_are_removed_on_load(store, tmp_path):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    folder = os.path.join(str(tmp_path / "data"), "documents", doc.id)
+    for name in ("v1.pdf", "v2.pdf.tmp", "meta.json.tmp"):    # a crash between a write and its record
+        with open(os.path.join(folder, name), "wb") as fh:
+            fh.write(b"%PDF-signed")
+    assert store.get(doc.id).version == 0
+    assert sorted(os.listdir(folder)) == ["meta.json", "v0.pdf"]
+    assert store.add_version(doc.id, b"%PDF-next") == 1 and store.latest_bytes(doc.id) == b"%PDF-next"
+    store.add_version(doc.id, b"%PDF-2"); store.undo(doc.id)
+    with open(os.path.join(folder, "v2.pdf"), "wb") as fh:  # an undo that crashed before removing its file
+        fh.write(b"%PDF-2")
+    assert store.get(doc.id).version == 1 and sorted(os.listdir(folder)) == ["meta.json", "v0.pdf", "v1.pdf"]
+    assert store.add_version(doc.id, b"%PDF-3") == 3          # highest-ever + 1: 2 is never reused
+
+
+def test_an_entry_that_cannot_be_removed_on_load_is_an_error(store, tmp_path, monkeypatch):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    folder = os.path.join(str(tmp_path / "data"), "documents", doc.id)
+    open(os.path.join(folder, "v1.pdf"), "wb").close()
+
+    def stuck(path, *a, **k):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(os, "remove", stuck)
+    with pytest.raises(PermissionError):
+        store.get(doc.id)

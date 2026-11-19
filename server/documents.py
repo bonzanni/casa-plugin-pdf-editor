@@ -96,6 +96,11 @@ def _check_pdf(data: bytes) -> tuple[int, bool]:
                 raise Refused(
                     f"Page {page.number + 1} is rotated and its visible area does not start "
                     "at the page origin; this plugin cannot place marks on it reliably.")
+            kind, unit = doc.xref_get_key(page.xref, "UserUnit")
+            if kind != "null" and not (kind in ("int", "real") and _close(float(unit), 1)):
+                raise Refused(
+                    f"Page {page.number + 1} is rotated and uses a scaled page unit (UserUnit "
+                    f"{unit}); this plugin cannot place marks on it reliably.")
         flags = doc.get_sigflags()
         return doc.page_count, flags > 0 and bool(flags & 1)
     finally:
@@ -120,9 +125,24 @@ class Store:
         return path
 
     def _meta(self, doc_id: str) -> tuple[str, dict]:
+        """The document's folder and recorded state. Every read of a document's state goes
+        through here, so a crash's leftovers are gone before any tool uses the document."""
         path = self._dir(doc_id)
         with open(os.path.join(path, "meta.json"), encoding="utf-8") as fh:
-            return path, json.load(fh)
+            meta = json.load(fh)
+        self._reconcile(path, meta)
+        return path, meta
+
+    @staticmethod
+    def _reconcile(path: str, meta: dict) -> None:
+        """Remove every file the history does not record: a version written but never recorded
+        (a crash between the version's write and the metadata's), a version an interrupted
+        undo dropped, and temp files. Version numbers come from ``meta['highest']``, so a
+        removed number is never handed out again once recorded."""
+        keep = {"meta.json"} | {f"v{v['n']}.pdf" for v in meta["versions"]}
+        for name in os.listdir(path):
+            if name not in keep:
+                os.remove(os.path.join(path, name))
 
     @staticmethod
     def _save_meta(path: str, meta: dict) -> None:

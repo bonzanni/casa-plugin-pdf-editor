@@ -225,6 +225,13 @@ class SignatureStore:
         self._write(self._pending, cleaned)
         return _preview_id(cleaned)
 
+    def clear_pending(self) -> None:
+        """Drop the pending preview, if any."""
+        try:
+            os.unlink(self._pending)
+        except FileNotFoundError:
+            pass
+
     def _write(self, path: str, data: bytes) -> None:
         """Write ``data`` to ``path`` atomically: a 0600 temp file, then ``os.replace``."""
         os.makedirs(self._dir, mode=0o700, exist_ok=True)

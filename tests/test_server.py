@@ -286,3 +286,34 @@ def test_only_the_deliver_tool_returns_a_handoff_path(server, tmp_path):
     assert len(results) == 12
     for name, text in results.items():
         assert ("/handoff" in text) == (name == "send_pdf_to_chat"), name
+
+
+def test_a_preview_that_cannot_be_delivered_leaves_nothing_pending(server, tmp_path, casa_dirs, monkeypatch):
+    import casa_broker
+
+    def refused(*a, **k):
+        raise casa_broker.DepositFailed("broker_down")
+
+    monkeypatch.setattr(delivery, "_deposit_file", refused)
+    shot = in_handoff(tmp_path, photo(800, 600), "signature.jpg")
+    with pytest.raises(Exception, match="nothing is pending, send the photo again"):
+        call("preview_signature", path=shot)
+    assert js(call("signature_status"))["pending"] is False and os.listdir(casa_dirs.outbox) == []
+
+
+def test_a_preview_that_cannot_be_held_pending_is_never_sent(server, tmp_path, casa_dirs, monkeypatch):
+    deposits = []
+    monkeypatch.setattr(delivery, "_deposit_file", lambda *a, **k: deposits.append(a) or REFERENCE)
+    shot = in_handoff(tmp_path, photo(800, 600), "signature.jpg")
+
+    real = os.replace
+
+    def broken(*a, **k):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "replace", broken)
+    with pytest.raises(Exception, match="Input/output error"):
+        call("preview_signature", path=shot)
+    monkeypatch.setattr(os, "replace", real)
+    assert deposits == [] and os.listdir(casa_dirs.outbox) == []
+    assert js(call("signature_status"))["pending"] is False

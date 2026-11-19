@@ -65,7 +65,7 @@ The assistant says beforehand which look applies. The signed version is final: f
 ## Known limits
 
 - A visual signature only, as above. One signature per install.
-- A document with a rotated page whose visible area is offset (rotated and cropped, or rotated with an offset page box) is refused when opened. Encrypted files and XFA forms are refused too.
+- A document with a rotated page whose visible area is offset or scaled (rotated and cropped, rotated with an offset page box, or rotated with a scaled page unit) is refused when opened. Encrypted files and XFA forms are refused too.
 - Add-only editing: the plugin cannot remove or change what is printed on the page, and does no page operations.
 - Form text fields take only Western European characters; for other characters the assistant writes a text mark instead, which covers what the bundled DejaVu Sans font has.
 - The signature photo you send also sits in Casa's inbox and handoff folder for their normal retention (seven days in the handoff folder), which the plugin does not control.

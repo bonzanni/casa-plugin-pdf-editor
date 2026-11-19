@@ -159,7 +159,9 @@ def test_field_values_of_the_wrong_kind_are_refused():
 
 def test_radio_group_takes_the_on_state_of_one_button():
     out, report, _ = apply(radio_form(), [], {"pick": "b"})
-    assert report == [{"ok": True, "what": "field 'pick'", "problem": None, "page": 1, "rect": [100.0, 100.0, 115.0, 115.0]}]
+    assert report == [{"ok": True, "what": "field 'pick'", "problem": None, "page": 1, "rect": [100.0, 100.0, 115.0, 115.0],
+                       "widgets": [{"page": 1, "rect": [100.0, 100.0, 115.0, 115.0]},
+                                   {"page": 1, "rect": [100.0, 130.0, 115.0, 145.0]}]}]
     assert [f["value"] for f in facts(out, 1)["fields"]] == ["Off", "b"]
     out, report, _ = apply(out, [], {"pick": "a"})
     assert [f["value"] for f in facts(out, 1)["fields"]] == ["a", "Off"]
@@ -385,3 +387,57 @@ def test_text_marks_then_signing_show_everything():
             for box in boxes:
                 assert ink_in(signed, 1, box) == ink_in(twice, 1, box) > 50, (make.__name__, box)
             assert _drew(twice, signed, (72, 340, 222, 400))
+
+
+def _one_field_two_widgets(rects) -> bytes:
+    """One text field 'f' (a parent with two /Kids widgets, font size 14) on two pages;
+    ``rects`` holds (0-based page, rect) per widget."""
+    doc = pymupdf.open(); doc.new_page(); doc.new_page()
+    kids = []
+    for i, (pno, rect) in enumerate(rects):
+        w = pymupdf.Widget(); w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT; w.field_name = f"k{i}"
+        w.rect = pymupdf.Rect(rect); w.text_fontsize = 14
+        kids.append(doc[pno].add_widget(w).xref)
+    parent = doc.get_new_xref()
+    doc.update_object(parent, "<</FT/Tx/T(f)/DA(0 0 0 rg /Helv 14 Tf)/Kids[%s]>>"
+                      % " ".join(f"{x} 0 R" for x in kids))
+    for x in kids:
+        doc.xref_set_key(x, "T", "null"); doc.xref_set_key(x, "FT", "null")
+        doc.xref_set_key(x, "Parent", f"{parent} 0 R")
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm/Fields", f"[{parent} 0 R]")
+    pdf = doc.tobytes()
+    check = pymupdf.open(stream=pdf, filetype="pdf")
+    widgets = [w for page in check for w in page.widgets()]
+    assert [w.field_name for w in widgets] == ["f", "f"]
+    assert all(f"/Parent {parent} 0 R" in check.xref_object(w.xref, compressed=True) for w in widgets)
+    return pdf
+
+
+def _baked_in(pdf: bytes, rects) -> list[str]:
+    doc = pymupdf.open(stream=pdf, filetype="pdf"); doc.bake()
+    flat = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
+    return [" ".join(flat[pno].get_text(clip=rect).split()) for pno, rect in rects]
+
+
+_WIDE, _NARROW = (50, 50, 300, 80), (50, 100, 85, 130)
+
+
+def test_a_value_cut_off_in_any_widget_of_the_field_is_refused_and_no_widget_changes():
+    for rects in ([(0, _WIDE), (0, _NARROW)], [(0, _WIDE), (1, _NARROW)]):
+        src = _one_field_two_widgets(rects)
+        out, report, pages = apply(src, [], {"f": "ABCDEFGHIJKLMN"})
+        assert report[0]["ok"] is False and pages == []
+        narrow_page = rects[1][0] + 1
+        assert "only 'ABCD' would show" in report[0]["problem"]
+        assert f"page {narrow_page}" in report[0]["problem"] and "[50.0, 100.0, 85.0, 130.0]" in report[0]["problem"]
+        assert report[0]["page"] == 1 and report[0]["rect"] == [50.0, 50.0, 300.0, 80.0]
+        assert report[0]["widgets"] == [{"page": 1, "rect": [50.0, 50.0, 300.0, 80.0]},
+                                        {"page": narrow_page, "rect": [50.0, 100.0, 85.0, 130.0]}]
+        assert _baked_in(out, rects) == _baked_in(src, rects) == ["", ""]
+
+
+def test_a_value_that_fits_every_widget_of_the_field_shows_in_each():
+    rects = [(0, _WIDE), (1, (50, 100, 120, 130))]
+    out, report, pages = apply(_one_field_two_widgets(rects), [], {"f": "ABCD"})
+    assert report[0]["ok"] is True and pages == [1, 2] and len(report[0]["widgets"]) == 2
+    assert _baked_in(out, rects) == ["ABCD", "ABCD"]
