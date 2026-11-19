@@ -21,7 +21,7 @@ import tempfile
 
 import pymupdf
 
-from page_facts import _open_page, to_page_rect
+from page_facts import _open_page, place_sheet, to_page_rect
 
 _FONTS = os.path.join(os.path.dirname(__file__), "fonts")
 _CAVEAT_FILE = os.path.join(_FONTS, "Caveat-Regular.ttf")
@@ -299,8 +299,8 @@ class SignatureStore:
 
 def _place(page: pymupdf.Page, x: float, y: float,
            width: float, height: float, what: str) -> pymupdf.Rect:
-    """The unrotated rectangle for a displayed box with bottom-left (x, y); refuses one
-    that is not fully on the page."""
+    """The displayed rectangle of a box with bottom-left (x, y); refuses one that is not
+    fully on the page."""
     if not width > 0:
         raise ValueError(f"The {what} width must be greater than 0, not {width!r}.")
     shown = pymupdf.Rect(x, y - height, x + width, y)
@@ -309,7 +309,7 @@ def _place(page: pymupdf.Page, x: float, y: float,
             f"The {what} would reach outside the page: it would cover x {shown.x0:.1f} to "
             f"{shown.x1:.1f}, y {shown.y0:.1f} to {shown.y1:.1f}, and the page is "
             f"{page.rect.width:.1f} x {page.rect.height:.1f} points as displayed.")
-    return to_page_rect(page, shown.x0, shown.y0, shown.x1, shown.y1)
+    return shown
 
 
 def draw_handwritten(pdf: bytes, sig_png: bytes, *, page: int, x: float, y: float, width: float) -> bytes:
@@ -317,7 +317,7 @@ def draw_handwritten(pdf: bytes, sig_png: bytes, *, page: int, x: float, y: floa
     kept, upright as displayed; fields and annotations baked. New bytes; ``pdf`` is untouched."""
     doc, pg = _open_page(pdf, page)
     try:
-        rect = _place(pg, x, y, width, width * aspect(sig_png), "signature")
+        rect = to_page_rect(pg, *_place(pg, x, y, width, width * aspect(sig_png), "signature"))
         rotation = pg.rotation
         doc.bake()   # first: baked field appearances are appended to the content, over the mark
         doc[page - 1].insert_image(rect, stream=sig_png, rotate=rotation)
@@ -378,11 +378,10 @@ def draw_stamp(pdf: bytes, *, page: int, x: float, y: float, width: float,
     doc, pg = _open_page(pdf, page)
     try:
         rect = _place(pg, x, y, width, width / 3, "stamp")
-        rotation = pg.rotation
         stamp = _stamp(width, width / 3, signer_name, when)
         try:
             doc.bake()   # first: baked field appearances are appended to the content, over the mark
-            doc[page - 1].show_pdf_page(rect, stamp, 0, rotate=rotation)
+            place_sheet(doc[page - 1], stamp, *rect)
         finally:
             stamp.close()
         return doc.tobytes(garbage=3, deflate=True)

@@ -180,3 +180,13 @@ def test_stamp_fonts_are_subset():
     out = draw_stamp(blank_page(), page=1, x=72, y=720, width=180, signer_name="Łukasz Ćwik", when="2026-11-19 14:35")
     assert len(out) < 100_000
     assert "Łukasz Ćwik" in pymupdf.open(stream=out, filetype="pdf")[0].get_text()
+
+
+def test_stamp_on_a_rotated_page_is_upright_where_displayed():
+    from fixtures import ink_in, raw_span
+    out = draw_stamp(rotated_form(), page=1, x=100, y=400, width=180, signer_name="A. Example", when="2026-11-19")
+    assert ink_in(out, 1, (100, 340, 280, 400)) - ink_in(rotated_form(), 1, (100, 340, 280, 400)) > 200
+    caption = raw_span(out, "SIGNED ELECTRONICALLY")     # unrotated coordinates; upright as displayed is (0, -1)
+    assert caption["dir"] == (0.0, -1.0)
+    shown = pymupdf.Point(caption["origin"]) * pymupdf.open(stream=out, filetype="pdf")[0].rotation_matrix
+    assert 100 <= shown.x <= 140 and 340 <= shown.y <= 360

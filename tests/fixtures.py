@@ -334,3 +334,35 @@ def remapped_dejavu() -> bytes:
     doc.update_stream(table, b"".join((i + 1).to_bytes(2, "big") for i in range(0xFFFF)))
     doc.xref_set_key(descendant, "CIDToGIDMap", f"{table} 0 R")
     return doc.tobytes()
+
+
+def caveat_form() -> bytes:
+    """Printed text in an embedded Caveat, and a text field `f` whose /DA names that font
+    through the form's /DR, as a form made elsewhere may carry its own field font."""
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    page.insert_text((72, 72), "Printed in Caveat", fontname="cav", fontsize=14,
+                     fontfile=os.path.join(os.path.dirname(__file__), "..", "server", "fonts", "Caveat-Regular.ttf"))
+    w = pymupdf.Widget()
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+    w.field_name = "f"
+    w.rect = pymupdf.Rect(72, 100, 372, 130)
+    page.add_widget(w)
+    doc = pymupdf.open(stream=doc.tobytes(), filetype="pdf")
+    cav = next(f[0] for f in doc[0].get_fonts(full=True) if f[4] == "cav")
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm/DR", f"<</Font<</cav {cav} 0 R>>>>")
+    doc.xref_set_key(next(doc[0].widgets()).xref, "DA", "(/cav 12 Tf 0 g)")
+    return doc.tobytes()
+
+
+def embedded_fonts(pdf: bytes) -> dict[str, bytes]:
+    """Every embedded font program in ``pdf`` by base font name, read from the font objects
+    themselves (xref numbers change when a document is saved with garbage collection)."""
+    doc = pymupdf.open(stream=pdf, filetype="pdf")
+    out = {}
+    for xref in range(1, doc.xref_length()):
+        if doc.xref_get_key(xref, "Type")[1] == "/Font" and doc.xref_get_key(xref, "Subtype")[1] != "/CIDFontType2":
+            name, ext, _, buffer = doc.extract_font(xref)
+            if buffer:
+                out[f"{name}:{xref}" if name in out else name] = buffer
+    return out

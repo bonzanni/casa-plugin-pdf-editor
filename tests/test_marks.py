@@ -259,7 +259,7 @@ def test_a_page_font_named_like_ours_does_not_replace_it():
     box = (72, 75, 72 + _DEJAVU.text_length("éΩЖ", 20), 106)
     assert ink_in(control, 1, box) > 100 and ink_in(out, 1, box) == ink_in(control, 1, box)
 
-def test_three_successive_writes_each_get_a_fresh_font_and_all_show():
+def test_three_successive_writes_all_show():
     pdf = flat_form()
     lines = [("éΩЖ", 100), ("Łukasz Ćwik", 200), ("José Müller", 300)]
     sizes = [len(pdf)]
@@ -272,9 +272,7 @@ def test_three_successive_writes_each_get_a_fresh_font_and_all_show():
         alone, _, _ = apply(flat_form(), [{"kind": "text", "page": 1, "x": 72, "y": y, "text": text, "size": 20}], {})
         box = (72, y - 25, 72 + _DEJAVU.text_length(text, 20), y + 6)
         assert ink_in(pdf, 1, box) == ink_in(alone, 1, box) > 100, text
-    page = pymupdf.open(stream=pdf, filetype="pdf")[0]
-    assert sorted(f[4] for f in page.get_fonts(full=True) if f[4].startswith("dvs")) == ["dvs", "dvs1", "dvs2"]
-    assert all(b - a < 60_000 for a, b in zip(sizes, sizes[1:])), sizes   # fonts subset, not 380 KB each
+    assert all(b - a < 60_000 for a, b in zip(sizes, sizes[1:])), sizes   # our font subset, not 380 KB each
 
 def test_our_font_file_under_another_mapping_is_not_reused():
     from fixtures import remapped_dejavu
@@ -358,3 +356,32 @@ def test_a_field_on_a_rotated_page_passes_the_check_and_a_cut_off_one_does_not()
     assert apply(turned, [], {"f": "ABC"})[1][0]["ok"] is True
     _, report, _ = apply(turned, [], {"f": "ABCDEFGHIJKLMN"})
     assert report[0]["ok"] is False and "only 'ABCDE' would show" in report[0]["problem"]
+
+def test_the_documents_own_fonts_are_never_touched():
+    from fixtures import caveat_form, embedded_fonts
+    src = caveat_form()
+    before = embedded_fonts(src)
+    assert before and all(len(b) > 200_000 for b in before.values())   # Caveat embedded whole
+    out, report, _ = apply(src, [{"kind": "text", "page": 1, "x": 72, "y": 200, "text": "Łukasz Ćwik"},
+                                 {"kind": "text", "page": 1, "x": 72, "y": 240, "text": "Printed"}], {"f": "A. Example"})
+    assert all(r["ok"] for r in report)
+    after = embedded_fonts(out)
+    assert {k: v for k, v in after.items() if k in before} == before
+    assert "Łukasz Ćwik" in {t["text"] for t in facts(out, 1)["text"]}
+
+def test_text_marks_then_signing_show_everything():
+    from signature import draw_handwritten, draw_stamp
+    from fixtures import landmark_signature
+    for make in (field_form, rotated_form):
+        src = make()
+        once, _, _ = apply(src, [{"kind": "text", "page": 1, "x": 72, "y": 100, "text": "Łukasz Ćwik"}], {})
+        twice, _, _ = apply(once, [{"kind": "text", "page": 1, "x": 72, "y": 140, "text": "A. Example"}], {})
+        boxes = [(72, 85, 72 + _DEJAVU.text_length("Łukasz Ćwik", 11), 103),
+                 (72, 125, 72 + _DEJAVU.text_length("A. Example", 11), 143)]
+        for signed in (draw_stamp(twice, page=1, x=72, y=400, width=180, signer_name="A. Example", when="2026-11-19"),
+                       draw_handwritten(twice, landmark_signature(), page=1, x=72, y=400, width=150)):
+            texts = {t["text"] for t in facts(signed, 1)["text"]}
+            assert {"Łukasz Ćwik", "A. Example"} <= texts
+            for box in boxes:
+                assert ink_in(signed, 1, box) == ink_in(twice, 1, box) > 50, (make.__name__, box)
+            assert _drew(twice, signed, (72, 340, 222, 400))

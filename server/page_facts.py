@@ -54,20 +54,11 @@ def to_displayed(page: pymupdf.Page, obj):
     return (pymupdf.Rect(obj) * page.rotation_matrix).normalize()
 
 
-def font_alias(page: pymupdf.Page, wanted: str) -> str:
-    """An unused resource name for a font the plugin is about to embed on ``page``: ``wanted``
-    if the page has no font of that name, otherwise ``wanted`` plus the first free number.
-
-    ``insert_text``/``insert_font`` draw with whatever font a page already maps to a name, and
-    nothing short of the PDF's own encoding tables says such a font maps characters the way
-    ours does, so a font already in the document is never reused, whatever it contains."""
-    used = {f[4] for f in page.get_fonts(full=True)}   # (xref, ext, type, basefont, name, ...)
-    if wanted not in used:
-        return wanted
-    n = 1
-    while f"{wanted}{n}" in used:
-        n += 1
-    return f"{wanted}{n}"
+def place_sheet(page: pymupdf.Page, sheet: pymupdf.Document, x0: float, y0: float, x1: float, y1: float) -> None:
+    """Draw page 1 of ``sheet``, a PDF drawn upright in displayed orientation, over the
+    displayed rectangle (x0, y0, x1, y1) of ``page``, as a form XObject with its own
+    resources: the page's own resources are never read or changed."""
+    page.show_pdf_page(to_page_rect(page, x0, y0, x1, y1), sheet, 0, rotate=page.rotation)
 
 
 def _open_page(pdf: bytes, page: int) -> tuple[pymupdf.Document, pymupdf.Page]:

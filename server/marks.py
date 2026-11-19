@@ -7,7 +7,9 @@ report entry, never as an exception.
 
 Positions are in displayed points (see ``page_facts``); every conversion to the
 unrotated coordinates PyMuPDF draws in goes through ``page_facts.to_page`` and
-``page_facts.to_page_rect``.
+``page_facts.to_page_rect``. Text marks are drawn on a sheet of the plugin's own, in
+displayed coordinates with the bundled font, and placed over the page with
+``page_facts.place_sheet``: the document's own font resources are never read or changed.
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ import os
 
 import pymupdf
 
-from page_facts import font_alias, radio_buttons, to_displayed, to_page, to_page_rect
+from page_facts import place_sheet, radio_buttons, to_displayed, to_page, to_page_rect
 
 _FONT_FILE = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
 _FONT_NAME = "dvs"
@@ -93,7 +95,7 @@ def _inside(page: pymupdf.Page, x0: float, y0: float, x1: float, y1: float) -> N
                        f"which is {pr.width:.1f} x {pr.height:.1f} points as displayed.")
 
 
-def _text(page: pymupdf.Page, mark: dict, x: float, y: float) -> None:
+def _text(page: pymupdf.Page, mark: dict, x: float, y: float, sheets: dict) -> None:
     text = mark.get("text")
     if not isinstance(text, str) or not text.strip():
         raise _Problem("'text' must be a non-empty string.")
@@ -116,8 +118,11 @@ def _text(page: pymupdf.Page, mark: dict, x: float, y: float) -> None:
                                f"it needs {_FONT.text_length(text, fontsize=_MIN_SIZE):.1f} points.")
             width = _FONT.text_length(text, fontsize=size)
     _inside(page, x, y - _FONT.ascender * size, x + width, y - _FONT.descender * size)
-    page.insert_text(to_page(page, x, y), text, fontname=font_alias(page, _FONT_NAME), fontfile=_FONT_FILE,
-                     fontsize=size, color=_BLACK, rotate=page.rotation)
+    if page.number not in sheets:   # displayed size and orientation; placed over the page by apply
+        sheets[page.number] = pymupdf.open()
+        sheets[page.number].new_page(width=page.rect.width, height=page.rect.height)
+    sheets[page.number][0].insert_text((x, y), text, fontname=_FONT_NAME, fontfile=_FONT_FILE,
+                                       fontsize=size, color=_BLACK)
 
 
 def _stroke(page: pymupdf.Page, lines: list[list[tuple[float, float]]], width: float, colour) -> None:
@@ -128,11 +133,11 @@ def _stroke(page: pymupdf.Page, lines: list[list[tuple[float, float]]], width: f
     shape.commit()
 
 
-def _draw(page: pymupdf.Page, mark: dict) -> None:
+def _draw(page: pymupdf.Page, mark: dict, sheets: dict) -> None:
     kind = mark["kind"]
     v = [_number(mark, k) for k in _KEYS[kind]]
     if kind == "text":
-        _text(page, mark, *v)
+        _text(page, mark, *v, sheets)
     elif kind in ("tick", "cross"):
         x, y = v
         s = _positive(mark, "size", _MARK_SIZE)
@@ -158,13 +163,13 @@ def _draw(page: pymupdf.Page, mark: dict) -> None:
         shape.commit()
 
 
-def _mark(doc: pymupdf.Document, mark) -> int:
+def _mark(doc: pymupdf.Document, mark, sheets: dict) -> int:
     if not isinstance(mark, dict):
         raise _Problem("a mark must be an object with a 'kind'.")
     if mark.get("kind") not in _KINDS:
         raise _Problem(f"unknown kind {mark.get('kind')!r}; the kinds are {', '.join(_KINDS)}.")
     page = _page(doc, mark)
-    _draw(page, mark)
+    _draw(page, mark, sheets)
     return page.number + 1
 
 
@@ -286,6 +291,7 @@ def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[byt
     The input bytes are never modified.
     """
     doc = pymupdf.open(stream=pdf, filetype="pdf")
+    sheets: dict[int, pymupdf.Document] = {}   # page number -> the plugin's own sheet of text marks
     try:
         report: list[dict] = []
         touched: set[int] = set()
@@ -306,7 +312,10 @@ def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[byt
             report.append({"ok": False, "what": "marks", "problem": "'marks' must be a list of marks."})
             marks = []
         for i, mark in enumerate(marks or [], start=1):
-            run(_describe(i, mark), lambda mark=mark: {_mark(doc, mark)})
+            run(_describe(i, mark), lambda mark=mark: {_mark(doc, mark, sheets)})
+        for pno, sheet in sheets.items():
+            sheet.subset_fonts()   # the sheet's only font is ours; the document's fonts are never touched
+            place_sheet(doc[pno], sheet, 0, 0, sheet[0].rect.width, sheet[0].rect.height)
 
         if fields is not None and not isinstance(fields, dict):
             report.append({"ok": False, "what": "fields", "problem": "'fields' must map field names to values."})
@@ -326,22 +335,8 @@ def apply(pdf: bytes, marks: list[dict], fields: dict[str, object]) -> tuple[byt
                 run(f"field {_short(str(name))!r}", fill)
                 report[-1].update(_where(by_name.get(name)))
 
-        return _save(doc), report, sorted(touched)
+        return doc.tobytes(garbage=3, deflate=True), report, sorted(touched)
     finally:
+        for sheet in sheets.values():
+            sheet.close()
         doc.close()
-
-
-def _save(doc: pymupdf.Document) -> bytes:
-    """The document's bytes with its embedded fonts cut down to the glyphs it uses: every text
-    mark embeds the whole bundled font afresh (about 380 KB). Subsetting runs on a copy, so a
-    PDF MuPDF cannot subset is saved whole rather than half-changed."""
-    whole = doc.tobytes(garbage=3, deflate=True)
-    try:
-        copy = pymupdf.open(stream=whole, filetype="pdf")
-        try:
-            copy.subset_fonts()
-            return copy.tobytes(garbage=3, deflate=True)
-        finally:
-            copy.close()
-    except Exception:
-        return whole
