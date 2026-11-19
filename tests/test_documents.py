@@ -53,3 +53,21 @@ def test_purge_removes_only_old(store, tmp_path):
     doc = store.open(in_handoff(tmp_path, flat_form()))
     assert store.purge_old(now=time.time() + RETENTION_S - 60) == 0
     assert store.purge_old(now=time.time() + RETENTION_S + 60) == 1
+
+def test_erase_documents_removes_everything_and_reports_what_is_left(store, tmp_path, monkeypatch):
+    import shutil
+    keep, gone = store.open(in_handoff(tmp_path, flat_form())), store.open(in_handoff(tmp_path, flat_form()))
+    docs = tmp_path / "data" / "documents"
+    (docs / ".staging-abc").mkdir(); (docs / "stray.tmp").write_bytes(b"x")
+    real = shutil.rmtree
+
+    def stuck(path, *a, **k):
+        if keep.id in str(path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(shutil, "rmtree", stuck)
+    removed, left = store.erase_documents()
+    assert removed == 1 and left == [keep.id] and sorted(os.listdir(docs)) == [keep.id]
+    monkeypatch.setattr(shutil, "rmtree", real)
+    assert store.erase_documents() == (1, []) and os.listdir(docs) == []

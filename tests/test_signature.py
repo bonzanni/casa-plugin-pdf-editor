@@ -1,3 +1,4 @@
+import os
 import time
 
 import pymupdf
@@ -128,3 +129,17 @@ def test_both_looks_show_over_a_white_form_field():
     out = draw_stamp(white_field_form(), page=1, x=150, y=725, width=150, signer_name="A. Example", when="2026-11-19 14:35")
     shot = pymupdf.open(stream=out, filetype="pdf")[0].get_pixmap(clip=pymupdf.Rect(150, 690, 300, 725))
     assert _inked(shot) > 200                                                        # name and small print inside the field
+
+def test_erase_wipes_the_whole_signature_directory(tmp_path):
+    s = SignatureStore(str(tmp_path)); s.commit(s.set_pending(clean(photo(800, 600))))
+    s.set_pending(clean(photo(900, 500)))
+    (tmp_path / "signature" / ".write-x.tmp").write_bytes(b"signature bytes")
+    assert s.erase() == (True, []) and os.listdir(tmp_path / "signature") == []
+    assert s.erase() == (False, []) and SignatureStore(str(tmp_path / "none")).erase() == (False, [])
+
+def test_erase_reports_a_file_it_could_not_remove(tmp_path, monkeypatch):
+    s = SignatureStore(str(tmp_path)); s.commit(s.set_pending(clean(photo(800, 600))))
+    real = os.unlink
+    monkeypatch.setattr(os, "unlink", lambda p, *a, **k: (_ for _ in ()).throw(PermissionError(13, "Permission denied", p))
+                        if str(p).endswith("signature.png") else real(p, *a, **k))
+    assert s.erase() == (False, ["signature.png"]) and s.get() is not None

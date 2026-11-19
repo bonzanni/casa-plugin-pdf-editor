@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import tempfile
 
 import pymupdf
@@ -269,6 +270,24 @@ class SignatureStore:
             except FileNotFoundError:
                 pass
         return existed
+
+    def erase(self) -> tuple[bool, list[str]]:
+        """Remove everything under ``<root>/signature/``: the stored signature, the pending
+        preview and any temp file a crash left. Returns whether a stored signature was
+        removed and the sorted names of the entries still there (empty when complete)."""
+        if not os.path.isdir(self._dir):
+            return False, []
+        had = os.path.isfile(self._stored)
+        for entry in os.scandir(self._dir):
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path)
+                else:
+                    os.unlink(entry.path)
+            except OSError:
+                continue   # reported by what is still there below
+        left = sorted(os.listdir(self._dir))
+        return had and os.path.basename(self._stored) not in left, left
 
     def status(self) -> dict:
         stored = self.get()

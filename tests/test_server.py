@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import shutil
 
 import pymupdf
 import pytest
@@ -130,6 +132,10 @@ def test_writing_after_signing_starts_from_unsigned(server, tmp_path):
     call("sign_pdf", doc_id=doc, filename="form.pdf", version=1, look="stamp", page=1, x=72, y=720, width=180, signer_name="A. Example")
     again = js(call("write_on_pdf", doc_id=doc, marks=[{"kind": "text", "page": 1, "x": 72, "y": 500, "text": "more"}]))
     assert again["signature_removed"] is True and again["version"] == 3
+    call("sign_pdf", doc_id=doc, filename="form.pdf", version=3, look="stamp", page=1, x=72, y=720, width=180, signer_name="A. Example")
+    tried = js(call("write_on_pdf", doc_id=doc, preview_only=True, marks=text("try")))
+    assert tried["signature_removed"] is True and tried["version"] == 4
+    call("undo_last_write", doc_id=doc)
     sent_blocks = call("send_pdf_to_chat", doc_id=doc)
     assert [c.type for c in sent_blocks] == ["text"]                     # capability result: JSON only
     sent = js(sent_blocks)
@@ -159,17 +165,92 @@ def test_signature_registration(server, tmp_path):
     assert js(call("remove_signature")) == {"stored": False, "pending": False, "aspect": None}
 
 
+def _erase_result(result):
+    """The eraser's JSON, checked for exactly what Casa's parse_erase_result reads."""
+    out = js(result)
+    assert out["erasure"] in ("complete", "incomplete")
+    assert isinstance(out["report"], str) and out["report"].strip()
+    return out
+
+
 def test_erase_documents_keeps_signature_and_erase_all_removes_it(server, tmp_path):
     shot = in_handoff(tmp_path, photo(800, 600), "signature.jpg")
     call("store_signature", preview_id=js(call("preview_signature", path=shot))["preview_id"])
     doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
     js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))
-    assert js(call("erase_pdf_documents")) == {"documents_removed": 2}
+    erased = _erase_result(call("erase_pdf_documents"))
+    assert erased["erasure"] == "complete" and erased["documents_removed"] == 2
+    assert "signature is kept" in erased["report"] and "handoff" in erased["report"]
+    assert os.listdir(tmp_path / "data" / "documents") == []
     with pytest.raises(Exception, match="no open document"): call("look_at_page", doc_id=doc)
     assert js(call("signature_status"))["stored"] is True
     call("open_pdf", path=in_handoff(tmp_path, flat_form()))
-    assert js(call("erase_pdf_editor")) == {"documents_removed": 1, "signature_removed": True}
+    leftover = tmp_path / "data" / "signature" / ".write-x.tmp"          # a crash mid-write
+    leftover.write_bytes(b"signature bytes")
+    erased = _erase_result(call("erase_pdf_editor"))
+    assert erased["erasure"] == "complete" and erased["documents_removed"] == 1
+    assert erased["signature_removed"] is True and "handoff" in erased["report"]
+    assert not leftover.exists() and os.listdir(tmp_path / "data" / "signature") == []
+    assert os.listdir(tmp_path / "data" / "documents") == []
     assert js(call("signature_status")) == {"stored": False, "pending": False, "aspect": None}
+
+
+def test_erasing_nothing_is_complete(server):
+    for name in ("erase_pdf_documents", "erase_pdf_editor"):
+        assert _erase_result(call(name))["erasure"] == "complete"
+
+
+def test_an_entry_that_cannot_be_removed_makes_the_erase_incomplete(server, tmp_path, monkeypatch):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    other = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    real = shutil.rmtree
+
+    def stuck(path, *a, **k):
+        if doc in str(path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(shutil, "rmtree", stuck)
+    for name in ("erase_pdf_documents", "erase_pdf_editor"):
+        erased = _erase_result(call(name))
+        assert erased["erasure"] == "incomplete" and doc in erased["report"], name
+        assert erased["documents_removed"] == (1 if name == "erase_pdf_documents" else 0)
+    assert os.listdir(tmp_path / "data" / "documents") == [doc]
+    with pytest.raises(Exception, match="no open document"): call("look_at_page", doc_id=other)
+
+
+def test_a_signature_file_that_cannot_be_removed_makes_the_erase_incomplete(server, tmp_path, monkeypatch):
+    shot = in_handoff(tmp_path, photo(800, 600), "signature.jpg")
+    call("store_signature", preview_id=js(call("preview_signature", path=shot))["preview_id"])
+    real = os.unlink
+
+    def stuck(path, *a, **k):
+        if str(path).endswith("signature.png"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", stuck)
+    erased = _erase_result(call("erase_pdf_editor"))
+    assert erased["erasure"] == "incomplete" and "signature.png" in erased["report"]
+    assert erased["signature_removed"] is False
+
+
+def test_every_tool_refuses_without_plugin_data(server, tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA")
+    for name, args in (("signature_status", {}), ("erase_pdf_editor", {}),
+                       ("open_pdf", {"path": in_handoff(tmp_path, flat_form())})):
+        with pytest.raises(Exception, match="CLAUDE_PLUGIN_DATA is not set; the plugin has nowhere to keep its data"):
+            call(name, **args)
+
+
+def test_write_on_pdf_lets_marks_and_fields_be_omitted(server, tmp_path):
+    import pdf_server
+    schema = pdf_server.mcp._tool_manager.get_tool("write_on_pdf").parameters
+    assert set(schema["required"]) == {"doc_id"}
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    assert js(call("write_on_pdf", doc_id=doc))["version"] == 0
+    assert js(call("write_on_pdf", doc_id=doc, marks=None, fields=None))["version"] == 0
+    assert js(call("write_on_pdf", doc_id=doc, marks=text("x"), fields={}))["version"] == 1
 
 
 def every_tool_result(server, tmp_path) -> dict[str, str]:

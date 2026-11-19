@@ -27,7 +27,6 @@ import page_facts
 import signature
 from documents import Refused, Store
 
-DEFAULT_DATA = "/tmp/pdf-editor-plugin-data"
 PREVIEW_NAME = "signature-preview.png"
 PREVIEW_CAPTION = "Signature preview: is it upright and clean?"
 LOOKS = ("handwritten", "stamp")
@@ -36,7 +35,10 @@ mcp = FastMCP("pdf-editor")
 
 
 def _data_root() -> str:
-    return os.environ.get("CLAUDE_PLUGIN_DATA") or DEFAULT_DATA
+    root = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if not root:
+        raise ValueError("CLAUDE_PLUGIN_DATA is not set; the plugin has nowhere to keep its data.")
+    return root
 
 
 def _docs() -> Store:
@@ -106,7 +108,7 @@ def look_at_page(doc_id: str, page: int = 1, region: list[float] | None = None) 
 
 @mcp.tool()
 @_plain
-def write_on_pdf(doc_id: str, marks: list[dict] = [], fields: dict = {},
+def write_on_pdf(doc_id: str, marks: list[dict] | None = None, fields: dict | None = None,
                  preview_only: bool = False) -> list:
     """Write on the document, making a new version. marks, each with page and points
     from the top-left as displayed: text {x, y (baseline start), text, size?, max_width?}; tick
@@ -120,7 +122,7 @@ def write_on_pdf(doc_id: str, marks: list[dict] = [], fields: dict = {},
     docs = _docs()
     doc = docs.get(doc_id)
     if not preview_only and any(isinstance(m, dict) and m.get("kind") == "placeholder"
-                                for m in (marks if isinstance(marks, list) else [marks])):
+                                for m in (marks if isinstance(marks, list) else [marks or {}])):
         raise ValueError("A placeholder mark is only for trying a position: call write_on_pdf "
                          "with preview_only true, or leave the placeholder out.")
     base = docs.latest_unsigned_bytes(doc_id) if doc.signed else docs.latest_bytes(doc_id)
@@ -130,8 +132,8 @@ def write_on_pdf(doc_id: str, marks: list[dict] = [], fields: dict = {},
         return [_ok({**out, "note": "Nothing was applied; the document is unchanged."})]
     if not preview_only:
         out["version"] = docs.add_version(doc_id, new)
-        if doc.signed:
-            out["signature_removed"] = True
+    if doc.signed:
+        out["signature_removed"] = True   # a preview of a signed document is unsigned too
     out["pages_shown"] = touched
     return [*(_image(page_facts.render(new, p)) for p in touched), _ok(out)]
 
@@ -243,17 +245,47 @@ def remove_signature() -> str:
     return _ok(sigs.status())
 
 
+_LEFT_NOTE = (
+    "Not the plugin's to remove: files already sent to your chat stay there, and draft and "
+    "signed PDFs already released to Casa's handoff folder (signed ones include the signature) "
+    "are removed by Casa after its 7-day retention. Home Assistant backups taken earlier still "
+    "hold this data.")
+
+
+def _erase_result(lines: list[str], left: list[str], **counts) -> str:
+    """Casa's erase contract: ``erasure`` complete only when nothing is left, and a report."""
+    if left:
+        lines.append("Could not delete: " + ", ".join(left) + "; run the erase again.")
+    lines.append(_LEFT_NOTE)
+    return _ok({"erasure": "incomplete" if left else "complete", "report": " ".join(lines),
+                **counts})
+
+
+def _documents_line(removed: int) -> str:
+    return (f"Deleted {removed} working document{'s' if removed != 1 else ''} and all their "
+            "versions." if removed else "There were no working documents.")
+
+
 @mcp.tool()
 def erase_pdf_editor() -> str:
-    """Delete every working document and the stored signature (and any pending preview)."""
-    removed = _docs().erase_documents()
-    return _ok({"documents_removed": removed, "signature_removed": _signatures().remove()})
+    """Delete every working document and the stored signature (and any pending preview).
+    Returns Casa's erase result: erasure complete or incomplete, and a report."""
+    removed, docs_left = _docs().erase_documents()
+    signature_removed, sig_left = _signatures().erase()
+    lines = [_documents_line(removed),
+             "Deleted the stored signature." if signature_removed else "No signature was stored."]
+    left = [f"documents/{n}" for n in docs_left] + [f"signature/{n}" for n in sig_left]
+    return _erase_result(lines, left, documents_removed=removed,
+                         signature_removed=signature_removed)
 
 
 @mcp.tool()
 def erase_pdf_documents() -> str:
-    """Delete every working document; the stored signature is kept."""
-    return _ok({"documents_removed": _docs().erase_documents()})
+    """Delete every working document; the stored signature is kept. Returns Casa's erase
+    result: erasure complete or incomplete, and a report."""
+    removed, left = _docs().erase_documents()
+    lines = [_documents_line(removed), "The stored signature is kept."]
+    return _erase_result(lines, [f"documents/{n}" for n in left], documents_removed=removed)
 
 
 if __name__ == "__main__":

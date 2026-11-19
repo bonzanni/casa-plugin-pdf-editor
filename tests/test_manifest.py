@@ -26,6 +26,8 @@ def test_manifest_agrees_with_the_server():
         assert m["resultContract"]["tools"][name] == {"result": "capability", "provides": ["file"],
                                                       "delivers": {"file": "operator_file"}, "filename": True}
     assert m["eraseTool"] == "erase_pdf_editor" and m["eraseDataOnlyTool"] == "erase_pdf_documents"
+    for name in (m["eraseTool"], m["eraseDataOnlyTool"]):
+        assert m["resultContract"]["tools"][name] == {"result": "safe"}
     assert "callbacks" not in m and "setupTool" not in m
 
 

@@ -213,14 +213,20 @@ class Store:
                 removed += 1
         return removed
 
-    def erase_documents(self) -> int:
-        """Remove every stored document now; returns how many."""
+    def erase_documents(self) -> tuple[int, list[str]]:
+        """Remove everything under ``<root>/documents/`` now, staging directories and
+        stray files included. Returns how many documents were removed and the sorted
+        names of the entries still there afterwards (empty when the erase is complete)."""
         removed = 0
         for entry in os.scandir(self._docs):
-            if not entry.name.startswith(_STAGING):
+            is_dir = entry.is_dir(follow_symlinks=False)
+            try:
+                if is_dir:
+                    shutil.rmtree(entry.path)
+                else:
+                    os.unlink(entry.path)
+            except OSError:
+                continue   # reported by what is still there below
+            if is_dir and _ID_RE.match(entry.name):
                 removed += 1
-            if entry.is_dir(follow_symlinks=False):
-                shutil.rmtree(entry.path, ignore_errors=True)
-            else:
-                os.remove(entry.path)
-        return removed
+        return removed, sorted(os.listdir(self._docs))
