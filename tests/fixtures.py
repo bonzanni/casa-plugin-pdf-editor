@@ -116,3 +116,26 @@ def in_handoff(tmp_path, data, name="form.pdf") -> str:
     os.makedirs(root, exist_ok=True)
     os.environ[casa_handoff.HANDOFF_ENV] = root
     return casa_handoff.publish("test", name, data=data)["path"]
+
+
+def image_only_page() -> bytes:
+    """A page whose only content is an inserted image (a scan without a text layer)."""
+    doc = pymupdf.open()
+    page = _new_page(doc)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 100, 100), False)
+    pix.clear_with(60)
+    page.insert_image(pymupdf.Rect(72, 72, 272, 272), pixmap=pix)
+    return doc.tobytes()
+
+
+def has_ink(pix: pymupdf.Pixmap, inset: int = 0) -> bool:
+    """Any pixel darker than mid-grey, ignoring a border of ``inset`` pixels."""
+    n, stride, samples = pix.n, pix.stride, pix.samples
+    colour = n - (1 if pix.alpha else 0)
+    for y in range(inset, pix.height - inset):
+        row = y * stride
+        for x in range(inset, pix.width - inset):
+            i = row + x * n
+            if sum(samples[i:i + colour]) < 128 * colour:
+                return True
+    return False
