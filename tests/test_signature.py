@@ -6,7 +6,7 @@ import pytest
 
 from fixtures import (cropped_form, field_form, flat_form, landmark_signature, photo, rotated_form, sideways,
                       white_field_form, with_orientation)
-from signature import SignatureStore, aspect, clean, draw_handwritten, draw_stamp
+from signature import SignatureStore, aspect, clean, draw_handwritten, draw_stamp, preview
 
 
 def test_clean_keeps_ink_drops_paper_and_crops():
@@ -23,6 +23,15 @@ def test_clean_handles_a_phone_sized_photo_quickly():
 
 def test_clean_refuses_a_blank_sheet():
     with pytest.raises(ValueError): clean(photo(800, 600, scribble=False))
+
+def test_preview_shows_the_signature_and_nothing_else():
+    cleaned = clean(photo(900, 1200)); a = aspect(cleaned)              # tall enough to leave side margins
+    pix = pymupdf.Pixmap(preview(cleaned)); w = pix.height * 180 / 260 / a
+    left, right = int((pix.width - w) / 2) - 3, int((pix.width + w) / 2) + 3
+    assert left > 40                                                    # the check below looks at something
+    outside = [pix.pixel(x, y) for y in range(pix.height) for x in list(range(left)) + list(range(right, pix.width))]
+    assert all(min(p[:3]) > 245 for p in outside)                       # no guide line, no frame
+    assert any(min(pix.pixel(x, pix.height // 2)[:3]) < 200 for x in range(left, right))
 
 def test_pending_is_not_stored_until_commit(tmp_path):
     s = SignatureStore(str(tmp_path)); cleaned = clean(photo(800, 600)); pid = s.set_pending(cleaned)

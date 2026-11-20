@@ -183,18 +183,16 @@ def aspect(sig_png: bytes) -> float:
 
 
 def preview(cleaned: bytes) -> bytes:
-    """PNG of a white card with a dotted line and the signature resting on it."""
-    card_w, card_h, pad, line_y = 600, 260, 40, 210
+    """PNG of a white card with the signature centred on it, and nothing else."""
+    card_w, card_h, pad = 600, 260, 40
     a = aspect(cleaned)
-    width = min(card_w - 2 * pad, (line_y - pad) / a)
+    width = min(card_w - 2 * pad, (card_h - 2 * pad) / a)
     height = width * a
-    x0 = (card_w - width) / 2
+    x0, y0 = (card_w - width) / 2, (card_h - height) / 2
     sheet = pymupdf.open()
     try:
         page = sheet.new_page(width=card_w, height=card_h)
-        page.draw_line((pad, line_y), (card_w - pad, line_y), color=(0.6, 0.6, 0.6),
-                       width=1, dashes="[2 3] 0")
-        page.insert_image(pymupdf.Rect(x0, line_y - height, x0 + width, line_y), stream=cleaned)
+        page.insert_image(pymupdf.Rect(x0, y0, x0 + width, y0 + height), stream=cleaned)
         return page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False).tobytes("png")
     finally:
         sheet.close()
