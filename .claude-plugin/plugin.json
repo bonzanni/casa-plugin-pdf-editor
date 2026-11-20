@@ -1,6 +1,6 @@
 {
   "name": "pdf-editor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Fill in and sign PDFs in chat: the assistant looks at each page, writes text, ticks and form values where it decides, shows the draft and signs with the operator's stored signature after their approval.",
   "author": {"name": "Nicola Bonzanni", "url": "https://github.com/bonzanni"},
   "homepage": "https://github.com/bonzanni/casa-plugin-pdf-editor",

@@ -17,9 +17,9 @@ Then `send_pdf_to_chat` so the operator sees the draft.
 
 ## Signing
 
-Signing is a protected call: Casa asks the operator. Say in one line what will be signed and with which look, then call `sign_pdf` with the filename and the version you just showed. Do not also ask in prose and wait. If it is refused because the document changed, show the current draft and ask again.
+Signing is a protected call: Casa asks the operator with an approval message that already names the file, the draft and the look. Call `sign_pdf` with the filename and the version you just showed. Do not announce the request or ask in prose and wait: the approval message is posted at the moment of the call and anything you write in that turn arrives under it, so a line, if you add one, must read right below it. If it is refused because the document changed, show the current draft and ask again.
 
-Check `signature_status` first. If a signature is stored, the look is `handwritten`; if none is, it is `stamp`, a framed "signed electronically" box with the name in a script font, which needs `signer_name`. Tell the operator beforehand which one applies. Try the position first with a `placeholder` mark in `preview_only` mode, the same size as the signature: for handwritten the height is the width times `aspect` from `signature_status`, for the stamp a third of the width. `sign_pdf` takes the bottom-left corner.
+Check `signature_status` first. If a signature is stored, the look is `handwritten`; if none is, it is `stamp`, a framed "signed electronically" box with the name in a script font, which needs `signer_name`. Tell the operator which one applies when you show the draft, in an earlier turn than the signing call. Try the position first with a `placeholder` mark in `preview_only` mode, the same size as the signature: for handwritten the height is the width times `aspect` from `signature_status`, for the stamp a third of the width. `sign_pdf` takes the bottom-left corner.
 
 After signing, `send_pdf_to_chat` again. To email the file, pass the `handoff_path` it returns to the Gmail plugin's attachment argument; only that tool returns a path.
 
