@@ -2,13 +2,18 @@ import asyncio
 import json
 import os
 import shutil
+import threading
 
 import pymupdf
 import pytest
 
 import casa_handoff
 import delivery
+import marks as marks_mod
+import signature
+from documents import Store
 from fixtures import flat_form, in_handoff, photo, signed_flag_form
+from processes import WAIT, call_once, child, write_each, write_until_told
 
 REFERENCE = "casa-cap-" + "0" * 32
 
@@ -317,3 +322,231 @@ def test_a_preview_that_cannot_be_held_pending_is_never_sent(server, tmp_path, c
     monkeypatch.setattr(os, "replace", real)
     assert deposits == [] and os.listdir(casa_dirs.outbox) == []
     assert js(call("signature_status"))["pending"] is False
+
+
+# -- several server processes on one data folder ------------------------------------------
+
+SIGN = dict(filename="form.pdf", look="stamp", page=1, x=72, y=720, width=180, signer_name="A. Example")
+MOVED = "the document changed since version 1; show the current draft and ask again"
+STAMP = "SIGNED ELECTRONICALLY"
+
+
+def history(tmp_path, doc) -> tuple[list[int], list[str]]:
+    """The version numbers the document records, and the files its folder holds."""
+    folder = tmp_path / "data" / "documents" / doc
+    with open(folder / "meta.json", encoding="utf-8") as fh:
+        return [v["n"] for v in json.load(fh)["versions"]], sorted(os.listdir(folder))
+
+
+def pdf_text(data: bytes) -> str:
+    return pymupdf.open(stream=data, filetype="pdf")[0].get_text()
+
+
+def test_two_processes_writing_one_document_both_get_a_version(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    words = {side: [f"{side}{i:02d}" for i in range(20)] for side in "ab"}
+    marks = {side: [{"kind": "text", "page": 1, "x": x, "y": 60 + 25 * i, "text": word}
+                    for i, word in enumerate(words[side])] for side, x in (("a", 72), ("b", 330))}
+    with child(write_each, doc, marks["a"]) as one, child(write_each, doc, marks["b"]) as two:
+        assert (one.told(), two.told()) == ("ready", "ready")
+        one.tell(); two.tell()
+        outcomes = one.told() + two.told()
+    assert [o for o in outcomes if isinstance(o, str)] == []             # no call failed
+    assert sorted(o["version"] for o in outcomes) == list(range(1, 41))  # 40 distinct numbers
+    versions, files = history(tmp_path, doc)
+    assert versions == list(range(41))
+    assert files == sorted(["meta.json", *(f"v{n}.pdf" for n in range(41))])
+    last = pdf_text(Store(str(tmp_path / "data")).latest_bytes(doc))
+    assert [w for w in words["a"] + words["b"] if w not in last] == []
+
+
+def test_a_reader_does_not_delete_a_version_being_written(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    failed = []
+    with child(write_until_told, doc) as writer:
+        assert writer.told() == "ready"
+        writer.tell()
+        assert writer.told() == "writing"
+        for _ in range(300):
+            try:
+                call("look_at_page", doc_id=doc)
+            except Exception as exc:
+                failed.append(str(exc))
+        writer.tell("stop")
+        outcomes = writer.told()
+    assert failed == [] and [o for o in outcomes if isinstance(o, str)] == []
+    versions, files = history(tmp_path, doc)
+    assert [o["version"] for o in outcomes] == versions[1:]
+    assert [f"v{n}.pdf" for n in versions if f"v{n}.pdf" not in files] == []
+
+
+def test_a_write_after_signing_starts_from_the_unsigned_version(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    assert js(call("sign_pdf", doc_id=doc, version=1, **SIGN))["signed"] is True
+    again = js(call("write_on_pdf", doc_id=doc, marks=[{"kind": "text", "page": 1, "x": 72, "y": 500, "text": "more"}]))
+    assert again["signature_removed"] is True and again["version"] == 3
+    store = Store(str(tmp_path / "data"))
+    content = pdf_text(store.latest_bytes(doc))
+    assert STAMP not in content and "one" in content and "more" in content
+    assert store.get(doc).signed is False
+
+
+def test_signing_a_version_that_moved_is_refused(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    shown = js(call("look_at_page", doc_id=doc))["version"]             # the draft the approval is for
+    with child(call_once, "write_on_pdf", {"doc_id": doc, "marks": text("two")}) as writer:
+        assert writer.told() == "ready"
+        writer.tell()
+        assert writer.told() == "attempting" and writer.told()["version"] == 2
+    with pytest.raises(Exception, match=MOVED):
+        call("sign_pdf", doc_id=doc, version=shown, **SIGN)
+    assert history(tmp_path, doc)[0] == [0, 1, 2] and Store(str(tmp_path / "data")).get(doc).signed is False
+
+
+def test_a_write_waits_while_a_version_is_being_signed(server, tmp_path, monkeypatch):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    draw, seen = signature.draw_stamp, {}
+    with child(call_once, "write_on_pdf", {"doc_id": doc, "marks": text("two")}) as writer:
+        assert writer.told() == "ready"
+
+        def drawing(*args, **kwargs):      # the version was checked; the signed copy is not stored yet
+            writer.tell()
+            seen["writer"] = writer.told()
+            seen["waits"] = writer.silent_for(0.5)
+            return draw(*args, **kwargs)
+
+        monkeypatch.setattr(signature, "draw_stamp", drawing)
+        signed = js(call("sign_pdf", doc_id=doc, version=1, **SIGN))
+        wrote = writer.told()
+    assert seen == {"writer": "attempting", "waits": True}
+    assert signed["version"] == 2 and wrote["version"] == 3 and wrote["signature_removed"] is True
+    assert history(tmp_path, doc)[0] == [0, 1, 2, 3]
+
+
+def test_what_is_sent_is_the_version_it_is_named_for(server, tmp_path, monkeypatch):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    call("sign_pdf", doc_id=doc, version=1, **SIGN)
+    signed_bytes = Store(str(tmp_path / "data")).latest_bytes(doc)
+    deposited, seen = [], {}
+
+    def deposit(slot, path, *, kind, caption, filename):
+        with open(path, "rb") as fh:
+            deposited.append((filename, fh.read()))
+        return REFERENCE
+
+    monkeypatch.setattr(delivery, "_deposit_file", deposit)
+    read = Store.latest_bytes
+    with child(call_once, "undo_last_write", {"doc_id": doc}) as undo:
+        assert undo.told() == "ready"
+
+        def reading(self, doc_id):         # the sender has read the label, not yet the bytes
+            undo.tell()
+            seen["undo"] = undo.told()
+            seen["waits"] = undo.silent_for(0.5)
+            return read(self, doc_id)
+
+        monkeypatch.setattr(Store, "latest_bytes", reading)
+        sent = js(call("send_pdf_to_chat", doc_id=doc))
+        undone = undo.told()
+    assert seen == {"undo": "attempting", "waits": True}
+    assert undone == {"version": 1, "signed": False}
+    assert deposited == [("form (signed).pdf", signed_bytes)] and sent["sent_as"] == "form (signed).pdf"
+    assert STAMP in pdf_text(signed_bytes) and casa_handoff.capture(sent["handoff_path"])[1] == signed_bytes
+
+
+@pytest.mark.parametrize("tool, other", [("open_pdf", "erase_pdf_documents"), ("look_at_page", "undo_last_write"),
+                                         ("undo_last_write", "write_on_pdf")])
+def test_a_tool_reads_the_state_and_the_bytes_it_reports_in_one_locked_section(server, tmp_path, monkeypatch, tool, other):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    args = {"path": in_handoff(tmp_path, flat_form(), "next.pdf")} if tool == "open_pdf" else {"doc_id": doc}
+    other_args = {"erase_pdf_documents": {}, "undo_last_write": {"doc_id": doc},
+                  "write_on_pdf": {"doc_id": doc, "marks": text("two")}}[other]
+    read, seen = Store.latest_bytes, {}
+    with child(call_once, other, other_args) as second:
+        assert second.told() == "ready"
+
+        def reading(self, doc_id):         # the tool knows the document's state, not yet its bytes
+            if not seen:
+                second.tell()
+                seen["second"] = second.told()
+                seen["waits"] = second.silent_for(0.5)
+            return read(self, doc_id)
+
+        monkeypatch.setattr(Store, "latest_bytes", reading)
+        first = js(call(tool, **args))
+        after = second.told()
+    assert seen == {"second": "attempting", "waits": True}
+    if tool == "open_pdf":
+        assert first["version"] == 0 and first["facts"]["page"] == 1
+        assert (after["erasure"], after["documents_removed"]) == ("complete", 2)
+    elif tool == "look_at_page":
+        assert first["version"] == 1 and any("one" in t["text"] for t in first["text"])
+        assert after == {"version": 0, "signed": False}
+    else:
+        assert first == {"version": 0, "signed": False} and after["version"] == 2
+
+
+def test_a_preview_of_a_large_form_does_not_hold_the_lock(server, tmp_path, monkeypatch):
+    form = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    other = js(call("open_pdf", path=in_handoff(tmp_path, flat_form(), "other.pdf")))["doc_id"]
+    apply, seen = marks_mod.apply, {}
+    with child(call_once, "look_at_page", {"doc_id": other}) as looker:
+        assert looker.told() == "ready"
+
+        def computing(*args):              # held here for the seconds a large form takes
+            looker.tell()
+            seen["looker"] = looker.told()
+            seen["looked"] = looker.told()
+            return apply(*args)
+
+        monkeypatch.setattr(marks_mod, "apply", computing)
+        tried = js(call("write_on_pdf", doc_id=form, marks=text("A. Example"), preview_only=True))
+    assert seen["looker"] == "attempting" and seen["looked"]["version"] == 0 and seen["looked"]["page"] == 1
+    assert tried["version"] == 0 and tried["preview_only"] is True
+    assert history(tmp_path, form) == ([0], ["meta.json", "v0.pdf"])
+
+
+def test_an_edit_that_marks_nothing_adds_no_version_and_a_preview_adds_none(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    untouched = ([0], ["meta.json", "v0.pdf"])
+    tried = call("write_on_pdf", doc_id=doc, marks=text("A. Example"), preview_only=True)
+    assert js(tried)["version"] == 0 and tried[0].type == "image" and history(tmp_path, doc) == untouched
+    failed = call("write_on_pdf", doc_id=doc, marks=[{"kind": "text", "page": 9, "x": 1, "y": 1, "text": "x"}])
+    assert [c.type for c in failed] == ["text"] and js(failed)["version"] == 0
+    assert js(failed)["note"] == "Nothing was applied; the document is unchanged."
+    assert history(tmp_path, doc) == untouched
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    call("sign_pdf", doc_id=doc, version=1, **SIGN)
+    tried = js(call("write_on_pdf", doc_id=doc, marks=text("try"), preview_only=True))
+    assert tried["signature_removed"] is True and tried["version"] == 2    # a signed document's too
+    assert history(tmp_path, doc)[0] == [0, 1, 2]
+
+
+def test_erase_while_another_process_writes_leaves_nothing_behind(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    erased = []
+    eraser = threading.Thread(target=lambda: erased.append(_erase_result(call("erase_pdf_documents"))), daemon=True)
+    with child(write_until_told, doc, True) as writer:
+        assert writer.told() == "ready"
+        writer.tell()
+        assert writer.told() == "inside"       # a write is under way: its base read, its version not stored
+        eraser.start()
+        eraser.join(0.5)
+        waited = eraser.is_alive()
+        writer.tell()
+        assert writer.told() == "writing"
+        eraser.join(WAIT)
+        writer.tell("stop")
+        outcomes = writer.told()
+    assert waited and outcomes[0]["version"] == 1                # the erase came after that write, whole
+    assert [(e["erasure"], e["documents_removed"]) for e in erased] == [("complete", 1)]
+    assert sorted(os.listdir(tmp_path / "data")) == ["documents", "documents.lock"]
+    assert os.listdir(tmp_path / "data" / "documents") == []
+    refused = [o for o in outcomes if isinstance(o, str)]
+    assert refused and outcomes[-len(refused):] == refused       # after the erase, never a version again
+    assert [r for r in refused if "There is no open document with id" not in r] == []

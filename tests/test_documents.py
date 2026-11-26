@@ -1,11 +1,15 @@
+import fcntl
 import os
+import stat
+import threading
 import time
 
 import pytest
 
-from documents import RETENTION_S, Refused
+from documents import RETENTION_S, Refused, Store
 from fixtures import (cropped_form, cropped_rotated_form, encrypted, flat_form, in_handoff,
                       offset_form, offset_rotated_form, rotated_form, signed_flag_form, userunit_form)
+from processes import WAIT, child, hold_the_lock
 
 
 def test_open_copies_and_never_touches_the_source(store, tmp_path):
@@ -139,3 +143,98 @@ def test_an_entry_that_cannot_be_removed_on_load_is_an_error(store, tmp_path, mo
     monkeypatch.setattr(os, "remove", stuck)
     with pytest.raises(PermissionError):
         store.get(doc.id)
+
+
+def _descriptors_on(path: str) -> int:
+    """How many of this process's open descriptors are on ``path``."""
+    count = 0
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            count += os.readlink(f"/proc/self/fd/{fd}") == path
+        except OSError:      # the descriptor that listed the folder is gone by now
+            pass
+    return count
+
+
+def test_the_lock_is_one_private_file_beside_the_documents_folder(store, tmp_path):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    lock = os.path.realpath(os.path.join(store.root, "documents.lock"))
+    assert sorted(os.listdir(store.root)) == ["documents", "documents.lock"]
+    assert stat.S_IMODE(os.stat(lock).st_mode) == 0o600
+    with store.locked():
+        with store.locked():                             # the holder's own re-entry does not block
+            assert store.add_version(doc.id, b"%PDF-1") == 1
+        assert _descriptors_on(lock) == 1                # and leaving it does not let go
+    assert _descriptors_on(lock) == 0
+    assert store.purge_old(now=time.time() + RETENTION_S + 60) == 1
+    assert store.erase_documents() == (0, []) and os.path.isfile(lock)
+
+
+def test_a_second_thread_of_one_process_waits_for_the_lock(store):
+    order = []
+
+    def second():
+        with Store(store.root).locked():
+            order.append("second")
+
+    thread = threading.Thread(target=second, daemon=True)
+    with store.locked():
+        thread.start()
+        thread.join(0.3)
+        assert thread.is_alive() and order == []
+        order.append("first")
+    thread.join(WAIT)
+    assert order == ["first", "second"]
+
+
+def test_every_use_of_the_store_waits_for_the_lock(store, tmp_path):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    another = in_handoff(tmp_path, flat_form(), "another.pdf")
+    uses = {
+        "open": lambda: store.open(another),
+        "get": lambda: store.get(doc.id),
+        "add_version": lambda: store.add_version(doc.id, b"%PDF-1"),
+        "undo": lambda: store.undo(doc.id),
+        "latest_bytes": lambda: store.latest_bytes(doc.id),
+        "latest_unsigned_bytes": lambda: store.latest_unsigned_bytes(doc.id),
+        "purge_old": store.purge_old,
+        "erase_documents": store.erase_documents,
+    }
+    returned = []
+
+    def use(name):
+        try:
+            uses[name]()
+        except Refused:      # the order is free once the lock is: the erase or the undo may come first
+            pass
+        returned.append(name)
+
+    threads = [threading.Thread(target=use, args=(name,), daemon=True) for name in uses]
+    with child(hold_the_lock, store.root) as holder:
+        assert holder.told() == "held"
+        for thread in threads:
+            thread.start()
+        threads[-1].join(0.3)
+        assert returned == []
+        holder.kill()
+        for thread in threads:
+            thread.join(WAIT)
+    assert sorted(returned) == sorted(uses)
+
+
+def test_a_dead_holder_frees_the_lock(store, tmp_path):
+    doc = store.open(in_handoff(tmp_path, flat_form()))
+    got = []
+    with child(hold_the_lock, store.root) as holder:
+        assert holder.told() == "held"
+        probe = os.open(os.path.join(store.root, "documents.lock"), os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):         # the child does hold it
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        holder.kill()
+        writer = threading.Thread(target=lambda: got.append(store.add_version(doc.id, b"%PDF-1")), daemon=True)
+        writer.start()
+        writer.join(WAIT)
+    assert got == [1]
