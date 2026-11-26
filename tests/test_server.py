@@ -458,37 +458,66 @@ def test_what_is_sent_is_the_version_it_is_named_for(server, tmp_path, monkeypat
     assert STAMP in pdf_text(signed_bytes) and casa_handoff.capture(sent["handoff_path"])[1] == signed_bytes
 
 
-@pytest.mark.parametrize("tool, other", [("open_pdf", "erase_pdf_documents"), ("look_at_page", "undo_last_write"),
-                                         ("undo_last_write", "write_on_pdf")])
-def test_a_tool_reads_the_state_and_the_bytes_it_reports_in_one_locked_section(server, tmp_path, monkeypatch, tool, other):
+@pytest.mark.parametrize("tool, step, other", [("open_pdf", "open", "erase_pdf_documents"),
+                                               ("look_at_page", "get", "undo_last_write"),
+                                               ("undo_last_write", "undo", "write_on_pdf")])
+def test_a_tool_reads_the_state_and_the_bytes_it_reports_in_one_locked_section(server, tmp_path, monkeypatch,
+                                                                               tool, step, other):
     doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
     call("write_on_pdf", doc_id=doc, marks=text("one"))
-    args = {"path": in_handoff(tmp_path, flat_form(), "next.pdf")} if tool == "open_pdf" else {"doc_id": doc}
+    folder, fresh = tmp_path / "data" / "documents" / doc, flat_form()
+    versions = {n: (folder / f"v{n}.pdf").read_bytes() for n in (0, 1)}
+    args = {"path": in_handoff(tmp_path, fresh, "next.pdf")} if tool == "open_pdf" else {"doc_id": doc}
     other_args = {"erase_pdf_documents": {}, "undo_last_write": {"doc_id": doc},
                   "write_on_pdf": {"doc_id": doc, "marks": text("two")}}[other]
-    read, seen = Store.latest_bytes, {}
+    first_step, read, seen = getattr(Store, step), Store.latest_bytes, {}
     with child(call_once, other, other_args) as second:
         assert second.told() == "ready"
 
-        def reading(self, doc_id):         # the tool knows the document's state, not yet its bytes
+        def stepping(self, *a, **k):       # the tool's first step on the store is done; it has no bytes yet
+            result = first_step(self, *a, **k)
             if not seen:
                 second.tell()
                 seen["second"] = second.told()
                 seen["waits"] = second.silent_for(0.5)
-            return read(self, doc_id)
+            return result
 
+        def reading(self, doc_id):         # and the other call is still waiting once the bytes are read
+            data = read(self, doc_id)
+            seen["bytes"], seen["still waits"] = data, second.silent_for(0)
+            return data
+
+        monkeypatch.setattr(Store, step, stepping)
         monkeypatch.setattr(Store, "latest_bytes", reading)
         first = js(call(tool, **args))
         after = second.told()
-    assert seen == {"second": "attempting", "waits": True}
+    assert (seen["second"], seen["waits"], seen["still waits"]) == ("attempting", True, True)
     if tool == "open_pdf":
-        assert first["version"] == 0 and first["facts"]["page"] == 1
+        assert first["version"] == 0 and seen["bytes"] == fresh
         assert (after["erasure"], after["documents_removed"]) == ("complete", 2)
     elif tool == "look_at_page":
-        assert first["version"] == 1 and any("one" in t["text"] for t in first["text"])
+        assert first["version"] == 1 and seen["bytes"] == versions[1]
         assert after == {"version": 0, "signed": False}
     else:
-        assert first == {"version": 0, "signed": False} and after["version"] == 2
+        assert first == {"version": 0, "signed": False} and seen["bytes"] == versions[0]
+        assert after["version"] == 2
+
+
+def test_a_refused_call_lets_go_of_the_lock(server, tmp_path):
+    doc = js(call("open_pdf", path=in_handoff(tmp_path, flat_form())))["doc_id"]
+    untouched = js(call("open_pdf", path=in_handoff(tmp_path, flat_form(), "other.pdf")))["doc_id"]
+    call("write_on_pdf", doc_id=doc, marks=text("one"))
+    box = {"kind": "placeholder", "page": 1, "x": 72, "y": 720, "width": 150, "height": 50}
+    for name, args, reason in (("sign_pdf", dict(doc_id=doc, version=0, **SIGN), "changed since version 0"),
+                               ("write_on_pdf", dict(doc_id=doc, marks=[box]), "preview_only"),
+                               ("look_at_page", dict(doc_id="0" * 16), "no open document"),
+                               ("undo_last_write", dict(doc_id=untouched), "nothing to undo")):
+        with pytest.raises(Exception, match=reason):       # each one refused inside its locked section
+            call(name, **args)
+    with child(call_once, "write_on_pdf", {"doc_id": doc, "marks": text("two")}) as second:
+        assert second.told() == "ready"                    # this process stays alive: nothing frees the lock for it
+        second.tell()
+        assert second.told() == "attempting" and second.told()["version"] == 2
 
 
 def test_a_preview_of_a_large_form_does_not_hold_the_lock(server, tmp_path, monkeypatch):
