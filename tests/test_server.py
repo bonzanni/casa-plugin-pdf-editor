@@ -493,10 +493,11 @@ def test_a_tool_reads_the_state_and_the_bytes_it_reports_in_one_locked_section(s
         after = second.told()
     assert (seen["second"], seen["waits"], seen["still waits"]) == ("attempting", True, True)
     if tool == "open_pdf":
-        assert first["version"] == 0 and seen["bytes"] == fresh
+        assert first["version"] == 0 and first["facts"]["page"] == 1 and seen["bytes"] == fresh
         assert (after["erasure"], after["documents_removed"]) == ("complete", 2)
     elif tool == "look_at_page":
         assert first["version"] == 1 and seen["bytes"] == versions[1]
+        assert any("one" in t["text"] for t in first["text"])
         assert after == {"version": 0, "signed": False}
     else:
         assert first == {"version": 0, "signed": False} and seen["bytes"] == versions[0]
