@@ -6,6 +6,12 @@ image per page shown before it. A refusal from a module (``Refused``,
 is the reason sentence; anything else propagates. The stores are built from
 ``CLAUDE_PLUGIN_DATA`` at each call, so nothing is held between calls.
 
+Several server processes of one install share the data folder. A tool that touches a
+document does so inside the store's lock (``Store.locked``), from its first read to its
+last write, so what it reports and what it uses or stores belong to one state of the
+document. Rendering pages, computing a preview and delivering to Casa happen after the
+lock is released, on the bytes read under it.
+
 ``send_pdf_to_chat`` and ``preview_signature`` are capability tools in Casa's
 result contract: their result is JSON only (Casa's parser rejects images), with
 the broker reference under ``file``; Casa replaces it with a receipt.
@@ -78,8 +84,9 @@ def open_pdf(path: str) -> list:
     other pages with look_at_page, then write_on_pdf. A 'warning' means the file carries a
     digital signature that any change invalidates; tell the operator."""
     docs = _docs()
-    doc = docs.open(path)
-    data = docs.latest_bytes(doc.id)
+    with docs.locked():
+        doc = docs.open(path)
+        data = docs.latest_bytes(doc.id)
     info = {"doc_id": doc.id, "filename": doc.filename, "pages": doc.pages,
             "version": doc.version, "signed": doc.signed}
     if doc.has_digital_signature:
@@ -98,8 +105,9 @@ def look_at_page(doc_id: str, page: int = 1, region: list[float] | None = None) 
     area at double resolution; the facts are always the whole page's. Use it to find where to
     write and to check marks closely."""
     docs = _docs()
-    doc = docs.get(doc_id)
-    data = docs.latest_bytes(doc_id)
+    with docs.locked():
+        doc = docs.get(doc_id)
+        data = docs.latest_bytes(doc_id)
     if region is not None and len(region) != 4:
         raise ValueError("region must be four numbers [x0, y0, x1, y1] in points.")
     png = page_facts.render(data, page, region=None if region is None else tuple(region))
@@ -121,18 +129,25 @@ def write_on_pdf(doc_id: str, marks: list[dict] | None = None, fields: dict | No
     preview_only draws without storing. Writing on a signed document starts from its last
     unsigned version."""
     docs = _docs()
-    doc = docs.get(doc_id)
-    if not preview_only and any(isinstance(m, dict) and m.get("kind") == "placeholder"
-                                for m in (marks if isinstance(marks, list) else [marks or {}])):
-        raise ValueError("A placeholder mark is only for trying a position: call write_on_pdf "
-                         "with preview_only true, or leave the placeholder out.")
-    base = docs.latest_unsigned_bytes(doc_id) if doc.signed else docs.latest_bytes(doc_id)
-    new, report, touched = marks_mod.apply(base, marks, fields)
-    out = {"report": report, "version": doc.version, "preview_only": preview_only}
+    with docs.locked():
+        doc = docs.get(doc_id)
+        if not preview_only and any(isinstance(m, dict) and m.get("kind") == "placeholder"
+                                    for m in (marks if isinstance(marks, list) else [marks or {}])):
+            raise ValueError("A placeholder mark is only for trying a position: call write_on_pdf "
+                             "with preview_only true, or leave the placeholder out.")
+        base = docs.latest_unsigned_bytes(doc_id) if doc.signed else docs.latest_bytes(doc_id)
+        version = doc.version
+        if not preview_only:
+            # A write computes inside the lock: nothing can move its base before its version is stored.
+            new, report, touched = marks_mod.apply(base, marks, fields)
+            if touched:
+                version = docs.add_version(doc_id, new)
+    if preview_only:
+        # A preview stores nothing, so it computes on what it read, with the lock released.
+        new, report, touched = marks_mod.apply(base, marks, fields)
+    out = {"report": report, "version": version, "preview_only": preview_only}
     if not touched:
         return [_ok({**out, "note": "Nothing was applied; the document is unchanged."})]
-    if not preview_only:
-        out["version"] = docs.add_version(doc_id, new)
     if doc.signed:
         out["signature_removed"] = True   # a preview of a signed document is unsigned too
     out["pages_shown"] = touched
@@ -146,9 +161,11 @@ def undo_last_write(doc_id: str) -> list:
     Returns the version now current and page 1's image. The dropped version's number is never
     reused."""
     docs = _docs()
-    docs.undo(doc_id)
-    doc = docs.get(doc_id)
-    return [_image(page_facts.render(docs.latest_bytes(doc_id), 1)),
+    with docs.locked():
+        docs.undo(doc_id)
+        doc = docs.get(doc_id)
+        data = docs.latest_bytes(doc_id)
+    return [_image(page_facts.render(data, 1)),
             _ok({"version": doc.version, "signed": doc.signed})]
 
 
@@ -160,9 +177,10 @@ def send_pdf_to_chat(doc_id: str, caption: str = "") -> str:
     asking to sign, and to deliver the signed result. Also returns handoff_path, the same PDF
     for another plugin (for example to attach to an email)."""
     docs = _docs()
-    doc = docs.get(doc_id)
-    return _ok(delivery.send_pdf(docs.latest_bytes(doc_id), doc.filename,
-                                 signed=doc.signed, caption=caption))
+    with docs.locked():     # the name it is sent under and the bytes are one version's
+        doc = docs.get(doc_id)
+        data = docs.latest_bytes(doc_id)
+    return _ok(delivery.send_pdf(data, doc.filename, signed=doc.signed, caption=caption))
 
 
 @mcp.tool()
@@ -176,29 +194,30 @@ def sign_pdf(doc_id: str, filename: str, version: int, look: str, page: int,
     top-left of the page as displayed, width in points (height follows: the signature's aspect,
     or width / 3 for the stamp). Then check the returned image and send_pdf_to_chat."""
     docs = _docs()
-    doc = docs.get(doc_id)
-    if filename != doc.filename:
-        raise ValueError(f"The document is {doc.filename!r}, not {filename!r}; nothing was signed.")
-    if version != doc.version:
-        raise ValueError(f"the document changed since version {version}; show the current draft "
-                         "and ask again")
-    if doc.signed:
-        raise ValueError("already signed; write on it again to start a new unsigned version")
-    if look not in LOOKS:
-        raise ValueError(f"look must be 'handwritten' or 'stamp', not {look!r}.")
-    data = docs.latest_bytes(doc_id)
-    if look == "handwritten":
-        sig = _signatures().get()
-        if sig is None:
-            raise ValueError("no signature is stored; use look 'stamp' or register one")
-        signed = signature.draw_handwritten(data, sig, page=page, x=x, y=y, width=width)
-    else:
-        if not signer_name.strip():
-            raise ValueError("look 'stamp' needs signer_name, the name written in the stamp.")
-        signed = signature.draw_stamp(data, page=page, x=x, y=y, width=width,
-                                      signer_name=signer_name,
-                                      when=time.strftime("%Y-%m-%d %H:%M"))
-    new_version = docs.add_version(doc_id, signed, signed=True)
+    with docs.locked():     # the version is checked and the signed copy stored in one section
+        doc = docs.get(doc_id)
+        if filename != doc.filename:
+            raise ValueError(f"The document is {doc.filename!r}, not {filename!r}; nothing was signed.")
+        if version != doc.version:
+            raise ValueError(f"the document changed since version {version}; show the current draft "
+                             "and ask again")
+        if doc.signed:
+            raise ValueError("already signed; write on it again to start a new unsigned version")
+        if look not in LOOKS:
+            raise ValueError(f"look must be 'handwritten' or 'stamp', not {look!r}.")
+        data = docs.latest_bytes(doc_id)
+        if look == "handwritten":
+            sig = _signatures().get()
+            if sig is None:
+                raise ValueError("no signature is stored; use look 'stamp' or register one")
+            signed = signature.draw_handwritten(data, sig, page=page, x=x, y=y, width=width)
+        else:
+            if not signer_name.strip():
+                raise ValueError("look 'stamp' needs signer_name, the name written in the stamp.")
+            signed = signature.draw_stamp(data, page=page, x=x, y=y, width=width,
+                                          signer_name=signer_name,
+                                          when=time.strftime("%Y-%m-%d %H:%M"))
+        new_version = docs.add_version(doc_id, signed, signed=True)
     return [_image(page_facts.render(signed, page)),
             _ok({"version": new_version, "signed": True, "page": page})]
 

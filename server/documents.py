@@ -5,18 +5,29 @@ Layout::
     <root>/documents/<id>/meta.json     filename, live versions, highest number, creation time
     <root>/documents/<id>/v0.pdf        the original, as captured from the handoff folder
     <root>/documents/<id>/v1.pdf ...    one file per change
+    <root>/documents.lock               the lock every use of the store takes; never deleted
 
 Version numbers only go up: ``undo`` drops the current version and the next
 ``add_version`` takes highest-ever + 1, so a number always means the same bytes.
 Nothing here ever rewrites an existing version file.
+
+Several server processes of one install share this folder. One lock covers the whole
+store, not one per document: a lock file inside a document's folder would be deleted by
+the purge and the erase while another process holds or waits on it. Every public method
+of :class:`Store` takes the lock itself; a caller that needs several of them to see one
+state wraps them in :meth:`Store.locked`.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import functools
 import json
 import os
 import re
 import secrets
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 
@@ -27,8 +38,54 @@ import casa_handoff
 RETENTION_S = 7 * 24 * 3600
 MAX_BYTES = 25_000_000
 
+LOCK_NAME = "documents.lock"
+
 _ID_RE = re.compile(r"^[0-9a-f]{16}$")
 _STAGING = ".staging-"
+
+_table_guard = threading.Lock()
+_thread_locks: dict[str, threading.RLock] = {}   # lock path -> the lock between this process's threads
+_held: dict[str, list[int]] = {}                 # lock path -> [descriptor, depth], while held
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """Hold the lock file ``path`` (created ``0600``) against every other thread and process.
+
+    Two locks, always taken in this order: this process's ``RLock`` for the path, then an
+    exclusive ``flock`` on the file. The ``flock`` is taken once, on one descriptor that
+    stays open while the depth count is above zero: a second descriptor on the same file
+    would wait for the first, in the same process too. So re-entry belongs to the thread
+    that holds the lock, and the kernel frees the ``flock`` when its process dies."""
+    with _table_guard:
+        thread_lock = _thread_locks.setdefault(path, threading.RLock())
+    with thread_lock:
+        held = _held.get(path)
+        if held is None:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except BaseException:
+                os.close(fd)
+                raise
+            held = _held[path] = [fd, 0]
+        held[1] += 1
+        try:
+            yield
+        finally:
+            held[1] -= 1
+            if not held[1]:
+                del _held[path]
+                os.close(held[0])   # closing the only descriptor releases the flock
+
+
+def _under_lock(method):
+    """Run a :class:`Store` method inside the store's lock."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self.locked():
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 class Refused(Exception):
@@ -112,6 +169,7 @@ class Store:
         self.root = root
         self._docs = os.path.join(root, "documents")
         os.makedirs(self._docs, exist_ok=True)
+        self._lock_path = os.path.join(os.path.realpath(root), LOCK_NAME)   # beside documents/, not in it
 
     # -- internal -----------------------------------------------------------
 
@@ -155,6 +213,12 @@ class Store:
 
     # -- public -------------------------------------------------------------
 
+    def locked(self):
+        """A context manager holding the store's one lock. Re-entrant for the thread that
+        holds it; every other thread and server process waits."""
+        return _file_lock(self._lock_path)
+
+    @_under_lock
     def open(self, handoff_path: str) -> Doc:
         self.purge_old()
         try:
@@ -185,6 +249,7 @@ class Store:
             raise
         return self.get(doc_id)
 
+    @_under_lock
     def get(self, doc_id: str) -> Doc:
         _, meta = self._meta(doc_id)
         current = meta["versions"][-1]
@@ -192,6 +257,7 @@ class Store:
                    signed=current["signed"], pages=meta["pages"],
                    has_digital_signature=meta["has_digital_signature"])
 
+    @_under_lock
     def add_version(self, doc_id: str, pdf_bytes: bytes, *, signed: bool = False) -> int:
         path, meta = self._meta(doc_id)
         n = meta["highest"] + 1
@@ -209,6 +275,7 @@ class Store:
             raise
         return n
 
+    @_under_lock
     def undo(self, doc_id: str) -> int:
         path, meta = self._meta(doc_id)
         if len(meta["versions"]) < 2:
@@ -221,15 +288,18 @@ class Store:
             pass
         return meta["versions"][-1]["n"]
 
+    @_under_lock
     def latest_bytes(self, doc_id: str) -> bytes:
         path, meta = self._meta(doc_id)
         return self._read(path, meta["versions"][-1]["n"])
 
+    @_under_lock
     def latest_unsigned_bytes(self, doc_id: str) -> bytes:
         path, meta = self._meta(doc_id)
         n = next(v["n"] for v in reversed(meta["versions"]) if not v["signed"])
         return self._read(path, n)
 
+    @_under_lock
     def purge_old(self, now: float | None = None) -> int:
         """Remove documents created more than :data:`RETENTION_S` ago; returns how
         many. Abandoned staging directories of the same age go too."""
@@ -250,10 +320,12 @@ class Store:
                 removed += 1
         return removed
 
+    @_under_lock
     def erase_documents(self) -> tuple[int, list[str]]:
         """Remove everything under ``<root>/documents/`` now, staging directories and
         stray files included. Returns how many documents were removed and the sorted
-        names of the entries still there afterwards (empty when the erase is complete)."""
+        names of the entries still there afterwards (empty when the erase is complete).
+        The lock file is beside that folder: the erase holds it and leaves it."""
         removed = 0
         for entry in os.scandir(self._docs):
             is_dir = entry.is_dir(follow_symlinks=False)
